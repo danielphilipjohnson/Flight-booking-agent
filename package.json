@@ -1,0 +1,20 @@
+{
+  "name": "flight-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first, tool-calling flight booking agent (Fastify + Next.js + Ollama + Postgres + MongoDB)",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev --workspace server",
+    "dev:web": "npm run dev --workspace web",
+    "seed": "npm run seed --workspace server",
+    "seed:check": "npm run seed:check --workspace server",
+    "test": "npm run harness --workspace server"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
