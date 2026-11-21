@@ -154,6 +154,13 @@ button:disabled {
   background: #374151;
 }
 
+.logout {
+  margin-left: auto;
+  background: #374151;
+  padding: 0.3rem 0.8rem;
+  font-size: 0.85rem;
+}
+
 .caret {
   animation: blink 1s steps(1) infinite;
   color: #9ca3af;

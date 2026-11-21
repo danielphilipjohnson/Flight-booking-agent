@@ -202,3 +202,44 @@ export function appendAssistantNote(
 ): ChatMessage[] {
   return [...messages, { id: crypto.randomUUID(), role: "assistant", content, toolTrace }];
 }
+
+export interface StoredMessage {
+  role: string;
+  content: string;
+  tool_calls?: unknown[];
+  tool_call_id?: string;
+  name?: string;
+  ts?: string | Date;
+}
+
+export function fromStoredMessages(stored: StoredMessage[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const m of stored) {
+    if (m.role === "user" || m.role === "assistant") {
+      out.push({ id: crypto.randomUUID(), role: m.role, content: m.content, toolTrace: [] });
+    } else if (m.role === "tool") {
+      const last = out[out.length - 1];
+      if (last && last.role === "assistant") {
+        const isError = m.content.includes('"error"');
+        const summary = m.content.length > 80 ? `${m.content.slice(0, 80)}…` : m.content;
+        last.toolTrace = [
+          ...(last.toolTrace ?? []),
+          { name: m.name ?? "tool", status: isError ? "error" : "ok", summary },
+        ];
+      }
+    }
+  }
+  const result: ChatMessage[] = [];
+  for (let i = 0; i < out.length; i++) {
+    const m = out[i]!;
+    if (m.role === "assistant" && m.content === "") {
+      const next = out[i + 1];
+      if (next && next.role === "assistant") {
+        next.toolTrace = [...(m.toolTrace ?? []), ...(next.toolTrace ?? [])];
+      }
+      continue;
+    }
+    result.push(m);
+  }
+  return result;
+}

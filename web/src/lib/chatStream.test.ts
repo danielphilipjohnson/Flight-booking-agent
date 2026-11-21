@@ -8,6 +8,7 @@ import {
   appendUserTurn,
   createSseParser,
   finalizeLastAssistant,
+  fromStoredMessages,
   removeEmptyTrailingAssistant,
   streamChatTurn,
   type ChatMessage,
@@ -103,6 +104,34 @@ test("message updaters are named pure functions with explicit behavior", () => {
 
   messages = appendAssistantNote(messages, "Declined — no changes were made.");
   assert.equal(messages[2]!.content, "Declined — no changes were made.");
+});
+
+test("fromStoredMessages maps Mongo history into UI messages, tool rows become chips", () => {
+  const stored = [
+    { role: "user", content: "flights to Lisbon?", ts: "2026-11-21T10:00:00Z" },
+    { role: "assistant", content: "", tool_calls: [{ id: "c1" }], ts: "2026-11-21T10:00:01Z" },
+    {
+      role: "tool",
+      tool_call_id: "c1",
+      name: "search_flights",
+      content: '{"results":[{"flight_id":"x"}]}',
+      ts: "2026-11-21T10:00:02Z",
+    },
+    { role: "assistant", content: "3 flights found.", ts: "2026-11-21T10:00:03Z" },
+    { role: "tool", tool_call_id: "c2", name: "hold_seat", content: '{"error":"seat 12A is held"}', ts: "2026-11-21T10:00:04Z" },
+  ];
+  const messages = fromStoredMessages(stored);
+  assert.equal(messages.length, 2);
+  assert.equal(messages[0]!.role, "user");
+  assert.equal(messages[1]!.content, "3 flights found.");
+  assert.deepEqual(
+    messages[1]!.toolTrace!.map((t) => [t.name, t.status]),
+    [
+      ["search_flights", "ok"],
+      ["hold_seat", "error"],
+    ],
+  );
+  assert.equal(fromStoredMessages([{ role: "system", content: "sys" }]).length, 0);
 });
 
 test("updaters are safe on edge cases", () => {
