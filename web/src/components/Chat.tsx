@@ -8,11 +8,14 @@ import {
   appendToolChip,
   appendUserTurn,
   finalizeLastAssistant,
+  fromStoredMessages,
   removeEmptyTrailingAssistant,
   streamChatTurn,
   type ChatMessage,
   type PendingConfirmation,
 } from "../lib/chatStream.ts";
+
+const SESSION_KEY = "flight-agent.session";
 
 const FALLBACK_USERS = [
   { user_ref: "ava", display_name: "Ava" },
@@ -50,6 +53,17 @@ export default function Chat() {
         if (body?.users?.length) setUsers(body.users);
       })
       .catch(() => {});
+    const saved = localStorage.getItem(SESSION_KEY);
+    if (!saved) return;
+    fetch(`/api/sessions/${saved}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("gone"))))
+      .then((body) => {
+        setSessionId(body.sessionId);
+        setUserRef(body.user_ref);
+        setDisplayName(body.user_ref);
+        setMessages(fromStoredMessages(body.messages));
+      })
+      .catch(() => localStorage.removeItem(SESSION_KEY));
   }, []);
 
   async function login(e: React.FormEvent) {
@@ -65,8 +79,22 @@ export default function Chat() {
       return;
     }
     const body = await res.json();
+    localStorage.setItem(SESSION_KEY, body.sessionId);
     setSessionId(body.sessionId);
     setDisplayName(body.display_name);
+    const history = await fetch(`/api/sessions/${body.sessionId}`);
+    if (history.ok) {
+      const hist = await history.json();
+      setMessages(fromStoredMessages(hist.messages));
+    }
+  }
+
+  function logout() {
+    localStorage.removeItem(SESSION_KEY);
+    setSessionId(null);
+    setDisplayName(null);
+    setMessages([]);
+    setChat({ stage: "idle" });
   }
 
   async function send(e: React.FormEvent) {
@@ -173,6 +201,9 @@ export default function Chat() {
         <span className="muted">
           logged in as {displayName} ({userRef})
         </span>
+        <button className="logout" onClick={logout}>
+          Log out
+        </button>
       </header>
       <div className="messages">
         {messages.length === 0 && (
