@@ -19,26 +19,33 @@ function seatSortKey(seatNo: string): [number, string] {
   return match ? [Number(match[1]), match[2]!] : [999, seatNo];
 }
 
-export async function releaseExpiredHolds(db: Queryable, now = new Date()): Promise<number> {
+export async function releaseExpiredHoldsStatements(q: Queryable, now = new Date()): Promise<number> {
   const cutoff = iso(now);
-  const expired = await db.query(
+  const expired = await q.query(
     "SELECT id FROM booking WHERE status = 'held' AND hold_expires_at IS NOT NULL AND hold_expires_at < $1",
     [cutoff],
   );
   if (expired.rows.length === 0) return 0;
-  await db.query(
+  await q.query(
     "UPDATE booking_seat SET active = FALSE WHERE booking_id IN (SELECT id FROM booking WHERE status = 'held' AND hold_expires_at IS NOT NULL AND hold_expires_at < $1)",
     [cutoff],
   );
-  await db.query(
+  await q.query(
     "UPDATE seat SET status = 'available', hold_expires_at = NULL WHERE status = 'held' AND hold_expires_at IS NOT NULL AND hold_expires_at < $1",
     [cutoff],
   );
-  const released = await db.query(
+  await q.query(
     "UPDATE booking SET status = 'cancelled', hold_expires_at = NULL WHERE status = 'held' AND hold_expires_at IS NOT NULL AND hold_expires_at < $1",
     [cutoff],
   );
   return expired.rows.length;
+}
+
+export async function releaseExpiredHolds(db: Queryable, now = new Date()): Promise<number> {
+  if (db.tx) {
+    return db.tx((q) => releaseExpiredHoldsStatements(q, now));
+  }
+  return releaseExpiredHoldsStatements(db, now);
 }
 
 async function resolveCodes(db: Queryable, value: string): Promise<string[]> {

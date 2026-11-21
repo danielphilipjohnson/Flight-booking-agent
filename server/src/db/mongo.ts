@@ -16,6 +16,7 @@ export interface SessionDoc {
   display_name: string;
   created_at: Date;
   messages: StoredMessage[];
+  context_summary?: { summary: string; evictedCount: number };
 }
 
 const client = new MongoClient(config.mongoUrl);

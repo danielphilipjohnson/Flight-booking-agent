@@ -37,7 +37,10 @@ export function sqliteDb(data: Dataset, schemaSql: string): DatabaseSync {
   return db;
 }
 
-export function toQueryable(db: DatabaseSync): Queryable & { db: DatabaseSync } {
+export function toQueryable(
+  db: DatabaseSync,
+  opts: { txMode?: "passthrough" | "real" } = {},
+): Queryable & { db: DatabaseSync } {
   const q: Queryable & { db: DatabaseSync } = {
     db,
     query: async (text, params = []) => {
@@ -55,7 +58,21 @@ export function toQueryable(db: DatabaseSync): Queryable & { db: DatabaseSync } 
       return { rows };
     },
   };
-  q.tx = async (fn) => fn(q);
+  if (opts.txMode === "real") {
+    q.tx = async (fn) => {
+      db.exec("BEGIN");
+      try {
+        const result = await fn(q);
+        db.exec("COMMIT");
+        return result;
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+    };
+  } else {
+    q.tx = async (fn) => fn(q);
+  }
   return q;
 }
 

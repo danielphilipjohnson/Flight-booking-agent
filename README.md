@@ -114,7 +114,10 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 - **Mock auth is deliberate.** Five seeded users (ava, ben, chloe, dan, elena)
   with a shared demo PIN. Real password hashing / OAuth is out of scope for a
   local portfolio app — multi-user isolation is demonstrated via SQL scoping, not
-  asserted.
+  asserted. Note that the returned `sessionId` is a **bearer credential**: anyone
+  with it can read the session (`GET /api/sessions/:id`) and confirm writes, so
+  treat it like a token and never log it. This is fine for a local demo; revisit
+  only if the app is ever deployed publicly.
 
 ## Roadmap
 

@@ -4,6 +4,8 @@ import {
   extractActiveIds,
   selectContext,
   windowMessages,
+  type CachedSummary,
+  type SummaryCache,
 } from "../agent/context.ts";
 import type { StoredMessage } from "../db/mongo.ts";
 
@@ -69,5 +71,29 @@ const noCompact = await selectContext(history, { maxMessages: 6, compactThreshol
 ok(!noCompact.compacted && noCompact.evicted === 5 && noCompact.messages.length === 5, "below threshold: plain window, no LLM call");
 const short = await selectContext(history.slice(0, 3), { maxMessages: 6, compactThreshold: 4, compact });
 ok(!short.compacted && short.messages.length === 3, "short history: untouched");
+
+console.log("\n# summary cache: compact once per evicted-count, not every call (issue #11)");
+let compactCalls = 0;
+let stored: CachedSummary | null = null;
+const cache: SummaryCache = {
+  get: () => stored,
+  set: (v) => {
+    stored = v;
+  },
+};
+const countingCompact = async (p: string) => {
+  compactCalls += 1;
+  return `SUMMARY #${compactCalls}`;
+};
+const opts = { maxMessages: 6, compactThreshold: 4, compact: countingCompact, summaryCache: cache };
+const c1 = await selectContext(history, opts);
+const c2 = await selectContext(history, opts);
+ok(compactCalls === 1 && c1.compacted && c2.compacted, "same history twice -> compact called once, second call reuses cached summary");
+ok(c2.messages[0]!.content === c1.messages[0]!.content, "cached summary is reused verbatim");
+const grown = [...history, msg("user", "one more"), msg("assistant", "ok"), msg("user", "and another"), msg("assistant", "sure"), msg("user", "more")];
+const c3 = await selectContext(grown, opts);
+ok(compactCalls === 2 && c3.evicted > c1.evicted, "history grew past the window -> evicted count changed -> re-compacts");
+const below = await selectContext(history.slice(0, 3), { ...opts });
+ok(compactCalls === 2 && !below.compacted, "below threshold: no compaction, cache untouched");
 
 console.log(`\n${passed} assertions passed`);

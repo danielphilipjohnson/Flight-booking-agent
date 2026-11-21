@@ -4,6 +4,17 @@ export interface ContextOptions {
   maxMessages: number;
   compactThreshold: number;
   compact?: (prompt: string) => Promise<string>;
+  summaryCache?: SummaryCache;
+}
+
+export interface CachedSummary {
+  summary: string;
+  evictedCount: number;
+}
+
+export interface SummaryCache {
+  get(): CachedSummary | null;
+  set(value: CachedSummary): void;
 }
 
 export interface ContextSelection {
@@ -63,8 +74,17 @@ export async function selectContext(
   if (!opts.compact || evicted.length < opts.compactThreshold) {
     return { messages: kept, compacted: false, evicted: evicted.length };
   }
+  const cached = opts.summaryCache?.get() ?? null;
+  if (cached && cached.evictedCount === evicted.length) {
+    return {
+      messages: [{ role: "assistant", content: cached.summary, ts: new Date() }, ...kept],
+      compacted: true,
+      evicted: evicted.length,
+    };
+  }
   const activeIds = extractActiveIds(history);
   const summary = await opts.compact(buildCompactionPrompt(evicted, activeIds));
+  opts.summaryCache?.set({ summary, evictedCount: evicted.length });
   return {
     messages: [{ role: "assistant", content: summary, ts: new Date() }, ...kept],
     compacted: true,
