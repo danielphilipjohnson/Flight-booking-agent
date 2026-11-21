@@ -139,3 +139,17 @@ button:disabled {
 .error {
   color: #fca5a5;
 }
+
+.confirm-card {
+  border: 1px solid #b45309;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.confirm-actions .decline {
+  background: #374151;
+}

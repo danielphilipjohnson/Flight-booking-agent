@@ -16,6 +16,11 @@ interface ChatMessage {
   toolTrace?: { name: string; status: string; summary: string }[];
 }
 
+interface PendingConfirmation {
+  tool: string;
+  args: Record<string, unknown>;
+}
+
 export default function Chat() {
   const [userRef, setUserRef] = useState("ava");
   const [pin, setPin] = useState("4321");
@@ -25,6 +30,7 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState<PendingConfirmation | null>(null);
 
   async function login(e: React.FormEvent) {
     e.preventDefault();
@@ -63,9 +69,50 @@ export default function Chat() {
         ...m,
         { role: "assistant", content: body.reply, toolTrace: body.toolTrace },
       ]);
+      if (body.pendingConfirmation) {
+        setPending(body.pendingConfirmation as PendingConfirmation);
+      } else {
+        setPending(null);
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
+      setBusy(false);
+    }
+  }
+
+  async function decide(confirm: boolean) {
+    if (!pending || !sessionId) return;
+    if (!confirm) {
+      setPending(null);
+      setMessages((m) => [...m, { role: "assistant", content: "Declined — no changes were made." }]);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/tools/${pending.tool}/confirm`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId, args: pending.args }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+      setMessages((m) => [
+        ...m,
+        {
+          role: "assistant",
+          content: `Confirmed: ${pending.tool} → ${JSON.stringify(body.result)}`,
+          toolTrace: [{ name: pending.tool, status: "ok", summary: "confirmed & executed" }],
+        },
+      ]);
+    } catch (err) {
+      setMessages((m) => [
+        ...m,
+        { role: "assistant", content: `Confirmation failed: ${(err as Error).message}` },
+      ]);
+    } finally {
+      setPending(null);
       setBusy(false);
     }
   }
@@ -124,6 +171,22 @@ export default function Chat() {
           </div>
         ))}
         {busy && <div className="msg assistant"><div className="bubble muted">thinking…</div></div>}
+        {pending && (
+          <div className="msg assistant">
+            <div className="bubble confirm-card">
+              <strong>Confirm write:</strong> {pending.tool}{" "}
+              <code>{JSON.stringify(pending.args)}</code>
+              <div className="confirm-actions">
+                <button onClick={() => decide(true)} disabled={busy}>
+                  Confirm
+                </button>
+                <button className="decline" onClick={() => decide(false)} disabled={busy}>
+                  Decline
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       {error && <p className="error">{error}</p>}
       <form className="composer" onSubmit={send}>

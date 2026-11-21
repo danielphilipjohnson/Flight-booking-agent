@@ -4,10 +4,10 @@ import { createOllamaClient } from "../agent/ollama.ts";
 import { driveLoop } from "../agent/loop.ts";
 import { buildSystemPrompt } from "../agent/prompt.ts";
 import { config } from "../config.ts";
-import { pool } from "../db/postgres.ts";
+import { pgQueryable } from "../db/postgres.ts";
 import { sessions, type StoredMessage } from "../db/mongo.ts";
 import { routeBriefLoader } from "../db/routes.ts";
-import { createFlightTools } from "../tools/flights.ts";
+import { createToolRegistry } from "../tools/registry.ts";
 
 const chatBody = z.object({
   sessionId: z.string().uuid(),
@@ -32,9 +32,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       routeBrief,
       holdMinutes: config.holdMinutes,
     });
-    const tools = createFlightTools({
-      query: (text, params) => pool.query(text, params ?? []),
-    });
+    const registry = createToolRegistry(pgQueryable, { holdMinutes: config.holdMinutes });
     const persist = async (messages: StoredMessage[]) => {
       await sessions().updateOne(
         { _id: sessionId },
@@ -42,24 +40,29 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       );
     };
 
-    const result = await driveLoop({
-      client: createOllamaClient(config.ollamaUrl),
-      model: config.ollamaModel,
-      systemPrompt,
-      history: session.messages,
-      userMessage: message,
-      tools,
-      ctx: { userRef: session.user_ref },
-      maxIterations: 8,
-      persist,
-    });
-    return {
-      sessionId,
-      reply: result.reply,
-      toolTrace: result.toolTrace,
-      pendingConfirmation: result.pendingConfirmation,
-      iterations: result.iterations,
-    };
+    try {
+      const result = await driveLoop({
+        client: createOllamaClient(config.ollamaUrl),
+        model: config.ollamaModel,
+        systemPrompt,
+        history: session.messages,
+        userMessage: message,
+        tools: registry.tools,
+        ctx: { userRef: session.user_ref, displayName: session.display_name },
+        maxIterations: 8,
+        persist,
+      });
+      return {
+        sessionId,
+        reply: result.reply,
+        toolTrace: result.toolTrace,
+        pendingConfirmation: result.pendingConfirmation,
+        iterations: result.iterations,
+      };
+    } catch (err) {
+      req.log.error(err);
+      return reply.code(502).send({ error: `agent backend failed: ${(err as Error).message}` });
+    }
   });
 
   app.get("/api/sessions/:id", async (req, reply) => {

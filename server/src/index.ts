@@ -4,6 +4,7 @@ import { config } from "./config.ts";
 import { connectMongo } from "./db/mongo.ts";
 import { authRoutes } from "./routes/auth.ts";
 import { chatRoutes } from "./routes/chat.ts";
+import { confirmRoutes } from "./routes/confirm.ts";
 import { healthRoutes } from "./routes/health.ts";
 
 const app = Fastify({ logger: true });
@@ -12,6 +13,7 @@ await app.register(cors, { origin: config.webOrigin });
 await app.register(healthRoutes);
 await app.register(authRoutes);
 await app.register(chatRoutes);
+await app.register(confirmRoutes);
 
 try {
   await connectMongo();

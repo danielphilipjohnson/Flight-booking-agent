@@ -37,11 +37,15 @@ export function sqliteDb(data: Dataset, schemaSql: string): DatabaseSync {
 }
 
 export function toQueryable(db: DatabaseSync): Queryable & { db: DatabaseSync } {
-  return {
+  const q: Queryable & { db: DatabaseSync } = {
     db,
     query: async (text, params = []) => {
-      const sql = text.replace(/\$\d+/g, "?");
-      const values = params.map((p) => {
+      const placeholders = [...text.matchAll(/\$(\d+)/g)].map((m) => Number(m[1]));
+      const sql = text
+        .replace(/\$\d+/g, "?")
+        .replace(/\s+FOR\s+UPDATE\s*$/im, "");
+      const raw = placeholders.length > 0 ? placeholders.map((n) => params[n - 1]) : params;
+      const values = raw.map((p) => {
         if (p instanceof Date) return p.toISOString();
         if (typeof p === "boolean") return p ? 1 : 0;
         return p;
@@ -50,6 +54,8 @@ export function toQueryable(db: DatabaseSync): Queryable & { db: DatabaseSync } 
       return { rows };
     },
   };
+  q.tx = async (fn) => fn(q);
+  return q;
 }
 
 export async function seededQueryable(): Promise<{ data: Dataset; q: Queryable & { db: DatabaseSync } }> {

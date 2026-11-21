@@ -9,7 +9,7 @@ import {
   type ToolDef,
 } from "./schemas.ts";
 
-function iso(value: unknown): string {
+export function iso(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   return String(value);
 }
