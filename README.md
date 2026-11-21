@@ -36,17 +36,26 @@ user (browser) --> Next.js chat UI --> POST /api/chat (SSE) --> Fastify agent AP
 │   └── src/
 │       ├── index.ts        # bootstrap, CORS, routes
 │       ├── config.ts
+│       ├── agent/
+│       │   ├── ollama.ts   # streaming /api/chat client + tool-call fragment reassembly
+│       │   ├── loop.ts     # tool-calling loop, iteration cap, confirm gate
+│       │   └── prompt.ts   # dynamic system prompt (clock, routes from DB, rules)
 │       ├── db/
 │       │   ├── postgres.ts # pg Pool + transaction helper
 │       │   ├── mongo.ts    # session + message persistence
+│       │   ├── routes.ts   # cached route brief (airport table -> prompt)
+│       │   ├── types.ts    # Queryable interface (pg or sqlite in tests)
 │       │   └── schema.sql  # tables, constraints, ownership scoping
-│       ├── routes/         # /api/health (chat routes land in Phase 2)
-│       └── seed/
-│           ├── generate.ts # deterministic dataset generator (mulberry32 + name-based UUIDs)
-│           ├── seed.ts     # CLI: --check preview, or TRUNCATE + insert into Postgres
-│           └── harness.ts  # invariant assertions + sqlite constraint simulation
-└── web/                    # Next.js chat UI
-    └── src/app/
+│       ├── routes/         # /api/health, /api/login, /api/chat, /api/sessions/:id
+│       ├── tools/
+│       │   ├── schemas.ts  # Zod schemas + tool registry types
+│       │   └── flights.ts  # 4 read tools (search/details/seats/my bookings)
+│       ├── seed/           # deterministic dataset generator + seed CLI + harness
+│       └── test/           # tools / prompt / loop harnesses (run without Docker)
+└── web/                    # Next.js chat UI (mock-user login + tool chips)
+    └── src/
+        ├── app/
+        └── components/Chat.tsx
 ```
 
 ## Getting started
@@ -62,9 +71,10 @@ npm run dev:server   # Fastify agent API on :3001
 npm run dev:web      # Next chat UI on :3000
 ```
 
-`npm test` runs the seed harness (no database needed): structural invariants of
-the generated dataset plus a `node:sqlite` simulation of `schema.sql` proving the
-constraints reject bad rows (unknown IATA, inverted times, double-claimed seat).
+`npm test` runs all harnesses (no database or Docker needed): seed invariants plus a
+`node:sqlite` simulation of `schema.sql`, the read tools against the seeded dataset,
+the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
+(fragment reassembly, Zod rejection, unknown tool, iteration cap, confirm gate).
 
 ## Design decisions that carry the portfolio story
 
@@ -99,8 +109,8 @@ constraints reject bad rows (unknown IATA, inverted times, double-claimed seat).
 
 | Phase | Scope | Done when |
 | --- | --- | --- |
-| 1. Foundations | Repo scaffold, Docker Compose, schema, deterministic seed | `docker compose up` + `npm run seed` gives queryable data (this PR) |
-| 2. Read-only agent | Agent loop, 4 read tools, Ollama tool-calling, chat UI, Mongo history | "flights to Lisbon tomorrow" → correct multi-step tool calls; per-user history survives restart |
+| 1. Foundations | Repo scaffold, Docker Compose, schema, deterministic seed | `docker compose up` + `npm run seed` gives queryable data (PR #1, merged) |
+| 2. Read-only agent | Agent loop, 4 read tools, Ollama tool-calling, chat UI, Mongo history | "flights to Lisbon tomorrow" → correct multi-step tool calls; per-user history survives restart (this PR) |
 | 3. Booking + transactions | hold/create/cancel, `FOR UPDATE`, confirm gate, concurrency test | Two parallel booking attempts → exactly one wins |
 | 4. Hardening + evals | Retry on malformed args, iteration cap, sliding-window history, eval set | Eval suite passes; "book without asking" is refused |
 | 5. Portfolio polish | README diagram, concurrency write-up, demo recording | Reviewer clones, `compose up`, books a seat in <10 min |
@@ -110,7 +120,20 @@ constraints reject bad rows (unknown IATA, inverted times, double-claimed seat).
 | Method + path | Purpose |
 | --- | --- |
 | `GET /api/health` | 200 when Postgres + Mongo reachable |
-| `POST /api/chat` | Body: session/user ref + message; runs agent loop (Phase 2) |
-| `POST /api/chat/stream` | SSE twin: typing / token / tool / confirm / done / error events |
+| `POST /api/login` | Mock auth: `{user_ref, pin}` → `{sessionId}` (session bound to user in Mongo) |
+| `POST /api/chat` | `{sessionId, message}` → runs the agent loop, returns `{reply, toolTrace, pendingConfirmation}`; every turn `$push`-ed to Mongo |
 | `GET /api/sessions/:id` | History from Mongo, per-user scoped |
-| `POST /api/tools/:name/confirm` | Confirm-before-write gate for hold/create/cancel |
+| `POST /api/chat/stream` | SSE twin: typing / token / tool / confirm / done / error events (Phase 3+) |
+| `POST /api/tools/:name/confirm` | Confirm-before-write gate for hold/create/cancel (Phase 3) |
+
+## Tool contract (Phase 2 — read tools)
+
+| Tool | Args | Returns |
+| --- | --- | --- |
+| `search_flights` | `origin`, `destination` (IATA or city), `date` (ISO) | `{ results: [{ flight_id, flight_no, departs_at }] }` — IDs only, by design |
+| `get_flight_details` | `flight_id` | times, base price, `seat_summary` per class/status |
+| `list_available_seats` | `flight_id`, `class?` | `{ available_seats: [{ seat_no, class, price }] }` |
+| `list_my_bookings` | — (session identity injected) | `{ bookings: [...] }`, cancelled excluded by SQL |
+
+Write tools (`hold_seat`, `create_booking`, `cancel_booking`) land in Phase 3 and are
+confirm-gated: the loop never executes them, it returns a `pendingConfirmation`.
