@@ -1,5 +1,6 @@
 import { MongoClient, type Collection, type Db } from "mongodb";
 import { config } from "../config.ts";
+import type { PendingProposal } from "../tools/proposal.ts";
 
 export interface StoredMessage {
   role: "user" | "assistant" | "tool" | "system";
@@ -17,6 +18,7 @@ export interface SessionDoc {
   created_at: Date;
   messages: StoredMessage[];
   context_summary?: { summary: string; evictedCount: number };
+  pending_proposal?: PendingProposal;
 }
 
 const client = new MongoClient(config.mongoUrl);

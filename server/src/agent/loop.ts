@@ -13,6 +13,7 @@ export interface ToolTraceEntry {
 export interface PendingConfirmation {
   tool: string;
   args: Record<string, unknown>;
+  id?: string;
 }
 
 export interface LoopResult {
@@ -68,6 +69,7 @@ export async function driveLoop(opts: {
   signal?: AbortSignal;
   onEvent?: (event: LoopEvent) => void | Promise<void>;
   persist?: (messages: StoredMessage[]) => Promise<void>;
+  makeProposalId?: () => string;
 }): Promise<LoopResult> {
   const {
     client,
@@ -82,6 +84,7 @@ export async function driveLoop(opts: {
     signal,
     onEvent,
     persist,
+    makeProposalId,
   } = opts;
 
   let compacted = false;
@@ -183,6 +186,7 @@ export async function driveLoop(opts: {
           pendingConfirmation = {
             tool: def.name,
             args: parsed.data as Record<string, unknown>,
+            ...(makeProposalId ? { id: makeProposalId() } : {}),
           };
           result = {
             pendingConfirmation: `proposed ${def.name}; awaiting user confirmation`,
