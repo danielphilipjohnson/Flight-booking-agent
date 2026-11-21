@@ -10,6 +10,17 @@ against Postgres** — argument validation, confirmation-before-write, row locki
 
 ## Architecture
 
+```mermaid
+flowchart LR
+  user["User (browser)"] --> next["Next.js chat UI<br/>(SSE via fetch + ReadableStream)"]
+  next -->|"POST /api/chat/stream"| api["Fastify agent API"]
+  api --> mongo[("MongoDB<br/>append-only sessions")]
+  api --> ctx["Context manager<br/>window + ID-preserving compaction"]
+  ctx --> ollama["Ollama (local LLM,<br/>tool calling)"]
+  api --> tools["Zod-validated tool layer<br/>7 tools, writes confirm-gated"]
+  tools --> pg[("Postgres<br/>flights / seats / bookings<br/>FOR UPDATE + unique index")]
+```
+
 ```
 user (browser) --> Next.js chat UI --> POST /api/chat (SSE) --> Fastify agent API
                                                                     |--> Ollama (local LLM, tool calling)
@@ -113,7 +124,7 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 | 2. Read-only agent | Agent loop, 4 read tools, Ollama tool-calling, chat UI, Mongo history | "flights to Lisbon tomorrow" → correct multi-step tool calls; per-user history survives restart (PR #2, merged) |
 | 3. Booking + transactions | hold/create/cancel, `FOR UPDATE`, confirm gate, concurrency test | Two parallel booking attempts → exactly one wins (PR #7, merged) |
 | 4. Hardening + evals | Malformed-arg retry, iteration cap, sliding-window + ID-preserving compaction, 13-scenario eval suite, token/latency stats | Eval suite passes; "book without asking" is refused (this PR) |
-| 5. Portfolio polish | README diagram, concurrency write-up, demo recording | Reviewer clones, `compose up`, books a seat in <10 min |
+| 5. Portfolio polish | SSE streaming chat, architecture diagram, concurrency write-up, demo script | Reviewer clones, `compose up`, books a seat in <10 min (this PR; recording is a manual step — see docs/DEMO.md) |
 
 ## API contract (stub)
 
@@ -123,7 +134,7 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 | `POST /api/login` | Mock auth: `{user_ref, pin}` → `{sessionId}` (session bound to user in Mongo) |
 | `POST /api/chat` | `{sessionId, message}` → runs the agent loop, returns `{reply, toolTrace, pendingConfirmation, stats}`; every turn `$push`-ed to Mongo |
 | `GET /api/sessions/:id` | History from Mongo, per-user scoped |
-| `POST /api/chat/stream` | SSE twin: typing / token / tool / confirm / done / error events (Phase 5) |
+| `POST /api/chat/stream` | SSE twin of `/api/chat`: `typing` / `token` / `tool` / `confirm` / `done` / `error` events; client disconnect aborts the Ollama call |
 | `POST /api/tools/:name/confirm` | `{sessionId, args}` → executes a confirm-gated write tool in a transaction, persists the trace to Mongo |
 
 ## Tool contract (Phase 2 — read tools)
@@ -166,6 +177,43 @@ Invariant: Mongo session documents stay **append-only** — windowing/compaction
 affect what is sent to the model, never what is stored. Each chat turn logs
 `{iterations, evalCount, promptEvalCount, compacted, latencyMs}` (the token/latency
 trace) and returns it as `stats`.
+
+## Concurrency: how double-booking is prevented
+
+Two layers, both testable:
+
+1. **Row lock** — `hold_seat` runs `SELECT ... FOR UPDATE` on the seat row inside a
+   transaction, so two concurrent holds serialize; the second sees
+   `status = 'held'` and gets a clean error.
+2. **Storage backstop** — the partial unique index
+   `booking_seat_active_unique ON booking_seat (flight_id, seat_no) WHERE active`
+   rejects a second *active* claim on the same seat even if application logic were
+   bypassed.
+
+`server/src/test/booking-harness.ts` proves it: two parallel `hold_seat` calls on the
+same seat → exactly one succeeds, exactly one active claim, the loser gets a clean
+error. Run `npm test` to see it.
+
+## Quickstart: clone and book a seat in 10 minutes
+
+```bash
+git clone <repo-url> && cd Flight-booking-agent
+docker compose up -d
+docker compose exec ollama ollama pull qwen3   # once
+cp .env.example .env && npm install
+npm run seed          # deterministic dataset
+npm run dev:server    # :3001
+npm run dev:web       # :3000 — log in as ava / PIN 4321
+```
+
+Ask "flights from London to Lisbon tomorrow", then "hold 12F on the evening one",
+Confirm, "book it for Ava". `npm test` runs 191 assertions (no Docker needed).
+
+## Demo
+
+See [docs/DEMO.md](docs/DEMO.md) for the 6-beat live demo script (search, urgency,
+confirm gate, per-user history, adversarial pokes, two-tab race). Recording the demo
+is a manual step (Ollama is local-only).
 
 ## Eval suite (Phase 4)
 
