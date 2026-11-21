@@ -8,7 +8,7 @@
     "start": "tsx src/index.ts",
     "seed": "tsx src/seed/seed.ts",
     "seed:check": "tsx src/seed/seed.ts --check",
-    "harness": "tsx src/seed/harness.ts && tsx src/test/tools-harness.ts && tsx src/test/prompt-harness.ts && tsx src/test/loop-harness.ts && tsx src/test/booking-harness.ts",
+    "harness": "tsx src/seed/harness.ts && tsx src/test/tools-harness.ts && tsx src/test/prompt-harness.ts && tsx src/test/loop-harness.ts && tsx src/test/booking-harness.ts && tsx src/test/context-harness.ts && tsx src/test/eval-harness.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

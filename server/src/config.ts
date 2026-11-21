@@ -18,4 +18,6 @@ export const config = {
   ollamaModel: process.env.OLLAMA_MODEL ?? "qwen3",
   seed: int(process.env.SEED, 42),
   holdMinutes: int(process.env.HOLD_MINUTES, 10),
+  maxHistoryMessages: int(process.env.MAX_HISTORY_MESSAGES, 40),
+  compactThreshold: int(process.env.COMPACT_THRESHOLD, 8),
 };

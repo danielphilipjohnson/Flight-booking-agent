@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import type { Queryable } from "../db/types.ts";
 import { generateDataset, type Dataset } from "../seed/generate.ts";
+import type { ChatChunk, OllamaClient, OllamaMessage } from "../agent/ollama.ts";
 
 export const FIXED_NOW = new Date("2026-11-20T12:00:00.000Z");
 
@@ -62,4 +63,38 @@ export async function seededQueryable(): Promise<{ data: Dataset; q: Queryable &
   const data = generateDataset(42, { now: FIXED_NOW });
   const db = sqliteDb(data, await loadSchemaSql());
   return { data, q: toQueryable(db) };
+}
+
+export function toolCallChunks(id: string, name: string, argsJsonFragments: string[]): ChatChunk[] {
+  return [
+    { message: { role: "assistant", content: "", tool_calls: [{ index: 0, id, type: "function", function: { name, arguments: argsJsonFragments[0] ?? "" } }] } },
+    ...argsJsonFragments.slice(1).map((fragment) => ({
+      message: { tool_calls: [{ index: 0, function: { arguments: fragment } }] },
+    })),
+    { done: true, eval_count: 42, prompt_eval_count: 100 },
+  ];
+}
+
+export function textChunks(text: string): ChatChunk[] {
+  return [
+    { message: { role: "assistant", content: text.slice(0, 5) } },
+    { message: { content: text.slice(5) } },
+    { done: true, eval_count: 42 },
+  ];
+}
+
+export function fakeOllamaClient(script: ChatChunk[][]): OllamaClient & { seenMessages: OllamaMessage[][] } {
+  const seenMessages: OllamaMessage[][] = [];
+  let call = 0;
+  return {
+    seenMessages,
+    chat(opts) {
+      seenMessages.push(opts.messages.map((m) => ({ ...m })));
+      const chunks = script[Math.min(call, script.length - 1)]!;
+      call += 1;
+      return (async function* () {
+        for (const chunk of chunks) yield chunk;
+      })();
+    },
+  };
 }

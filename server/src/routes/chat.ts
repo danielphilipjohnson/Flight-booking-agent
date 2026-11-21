@@ -41,6 +41,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
     };
 
     try {
+      const started = Date.now();
       const result = await driveLoop({
         client: createOllamaClient(config.ollamaUrl),
         model: config.ollamaModel,
@@ -50,14 +51,26 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         tools: registry.tools,
         ctx: { userRef: session.user_ref, displayName: session.display_name },
         maxIterations: 8,
+        context: {
+          maxMessages: config.maxHistoryMessages,
+          compactThreshold: config.compactThreshold,
+        },
         persist,
       });
+      const stats = {
+        iterations: result.iterations,
+        evalCount: result.evalCount,
+        promptEvalCount: result.promptEvalCount,
+        compacted: result.compacted,
+        latencyMs: Date.now() - started,
+      };
+      req.log.info({ sessionId, ...stats }, "chat turn");
       return {
         sessionId,
         reply: result.reply,
         toolTrace: result.toolTrace,
         pendingConfirmation: result.pendingConfirmation,
-        iterations: result.iterations,
+        stats,
       };
     } catch (err) {
       req.log.error(err);
