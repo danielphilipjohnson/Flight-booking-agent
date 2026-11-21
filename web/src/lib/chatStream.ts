@@ -14,6 +14,7 @@ export interface ChatMessage {
 export interface PendingConfirmation {
   tool: string;
   args: Record<string, unknown>;
+  id?: string;
 }
 
 export type ChatStreamEvent =

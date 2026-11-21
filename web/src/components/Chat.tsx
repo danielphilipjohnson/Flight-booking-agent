@@ -152,7 +152,11 @@ export default function Chat() {
       const res = await fetch(`/api/tools/${pending.tool}/confirm`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, args: pending.args }),
+        body: JSON.stringify({
+          sessionId,
+          confirmationId: pending.id,
+          args: pending.args,
+        }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);

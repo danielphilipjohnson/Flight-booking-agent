@@ -4,10 +4,12 @@ import { config } from "../config.ts";
 import { pgQueryable } from "../db/postgres.ts";
 import { sessions, type StoredMessage } from "../db/mongo.ts";
 import { createToolRegistry } from "../tools/registry.ts";
+import { matchProposal } from "../tools/proposal.ts";
 
 const confirmBody = z.object({
   sessionId: z.string().uuid(),
-  args: z.record(z.string(), z.unknown()),
+  confirmationId: z.string().optional(),
+  args: z.record(z.string(), z.unknown()).optional(),
 });
 
 export async function confirmRoutes(app: FastifyInstance): Promise<void> {
@@ -17,16 +19,32 @@ export async function confirmRoutes(app: FastifyInstance): Promise<void> {
     const { name } = req.params as { name: string };
     const parsed = confirmBody.safeParse(req.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: "sessionId (uuid) and args are required" });
+      return reply.code(400).send({ error: "sessionId (uuid) is required" });
     }
-    const session = await sessions().findOne({ _id: parsed.data.sessionId });
+    const { sessionId, confirmationId, args } = parsed.data;
+    const session = await sessions().findOne({ _id: sessionId });
     if (!session) {
       return reply.code(404).send({ error: "unknown session — log in first" });
     }
-    const outcome = await registry.executeConfirmed(name, parsed.data.args, {
+
+    const match = matchProposal(session.pending_proposal, {
+      tool: name,
+      ...(confirmationId !== undefined ? { confirmationId } : {}),
+      ...(args !== undefined ? { args } : {}),
+    });
+    if (!match.ok) {
+      if (match.expired) {
+        await sessions().updateOne({ _id: sessionId }, { $unset: { pending_proposal: "" } });
+      }
+      return reply.code(400).send({ error: match.error });
+    }
+    const proposal = session.pending_proposal!;
+
+    const outcome = await registry.executeConfirmed(name, proposal.args, {
       userRef: session.user_ref,
       displayName: session.display_name,
     });
+    await sessions().updateOne({ _id: sessionId }, { $unset: { pending_proposal: "" } });
     if (!outcome.ok) {
       return reply.code(400).send({ error: outcome.error });
     }
@@ -40,9 +58,9 @@ export async function confirmRoutes(app: FastifyInstance): Promise<void> {
       },
     ];
     await sessions().updateOne(
-      { _id: session._id },
+      { _id: sessionId },
       { $push: { messages: { $each: persisted } } },
     );
-    return { ok: true, tool: name, result: outcome.result };
+    return { ok: true, tool: name, confirmationId: proposal.id, result: outcome.result };
   });
 }

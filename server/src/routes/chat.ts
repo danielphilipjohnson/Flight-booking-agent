@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { createOllamaClient } from "../agent/ollama.ts";
@@ -10,6 +11,18 @@ import { routeBriefLoader } from "../db/routes.ts";
 import { createToolRegistry } from "../tools/registry.ts";
 import { formatSse } from "./sse.ts";
 import type { SummaryCache } from "../agent/context.ts";
+import type { PendingProposal } from "../tools/proposal.ts";
+
+async function saveProposal(sessionId: string, pending: { id?: string; tool: string; args: Record<string, unknown> }): Promise<void> {
+  if (!pending.id) return;
+  const proposal: PendingProposal = {
+    id: pending.id,
+    tool: pending.tool,
+    args: pending.args,
+    created_at: new Date(),
+  };
+  await sessions().updateOne({ _id: sessionId }, { $set: { pending_proposal: proposal } });
+}
 
 const chatBody = z.object({
   sessionId: z.string().uuid(),
@@ -102,6 +115,9 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
             latencyMs: Date.now() - started,
           },
         });
+      } else if (event.type === "confirm") {
+        await saveProposal(sessionId, event.pending);
+        send(event.type, event);
       } else {
         send(event.type, event);
       }
@@ -125,6 +141,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         signal: abort.signal,
         onEvent,
         persist,
+        makeProposalId: () => randomUUID(),
       });
     } catch (err) {
       req.log.error(err);
@@ -159,7 +176,11 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
           summaryCache: ctx.summaryCache,
         },
         persist,
+        makeProposalId: () => randomUUID(),
       });
+      if (result.pendingConfirmation?.id) {
+        await saveProposal(sessionId, result.pendingConfirmation);
+      }
       const stats = {
         iterations: result.iterations,
         evalCount: result.evalCount,
