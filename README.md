@@ -110,9 +110,9 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 | Phase | Scope | Done when |
 | --- | --- | --- |
 | 1. Foundations | Repo scaffold, Docker Compose, schema, deterministic seed | `docker compose up` + `npm run seed` gives queryable data (PR #1, merged) |
-| 2. Read-only agent | Agent loop, 4 read tools, Ollama tool-calling, chat UI, Mongo history | "flights to Lisbon tomorrow" → correct multi-step tool calls; per-user history survives restart (this PR) |
-| 3. Booking + transactions | hold/create/cancel, `FOR UPDATE`, confirm gate, concurrency test | Two parallel booking attempts → exactly one wins (this PR) |
-| 4. Hardening + evals | Retry on malformed args, iteration cap, sliding-window history, eval set | Eval suite passes; "book without asking" is refused |
+| 2. Read-only agent | Agent loop, 4 read tools, Ollama tool-calling, chat UI, Mongo history | "flights to Lisbon tomorrow" → correct multi-step tool calls; per-user history survives restart (PR #2, merged) |
+| 3. Booking + transactions | hold/create/cancel, `FOR UPDATE`, confirm gate, concurrency test | Two parallel booking attempts → exactly one wins (PR #7, merged) |
+| 4. Hardening + evals | Malformed-arg retry, iteration cap, sliding-window + ID-preserving compaction, 13-scenario eval suite, token/latency stats | Eval suite passes; "book without asking" is refused (this PR) |
 | 5. Portfolio polish | README diagram, concurrency write-up, demo recording | Reviewer clones, `compose up`, books a seat in <10 min |
 
 ## API contract (stub)
@@ -121,9 +121,9 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 | --- | --- |
 | `GET /api/health` | 200 when Postgres + Mongo reachable |
 | `POST /api/login` | Mock auth: `{user_ref, pin}` → `{sessionId}` (session bound to user in Mongo) |
-| `POST /api/chat` | `{sessionId, message}` → runs the agent loop, returns `{reply, toolTrace, pendingConfirmation}`; every turn `$push`-ed to Mongo |
+| `POST /api/chat` | `{sessionId, message}` → runs the agent loop, returns `{reply, toolTrace, pendingConfirmation, stats}`; every turn `$push`-ed to Mongo |
 | `GET /api/sessions/:id` | History from Mongo, per-user scoped |
-| `POST /api/chat/stream` | SSE twin: typing / token / tool / confirm / done / error events (Phase 4) |
+| `POST /api/chat/stream` | SSE twin: typing / token / tool / confirm / done / error events (Phase 5) |
 | `POST /api/tools/:name/confirm` | `{sessionId, args}` → executes a confirm-gated write tool in a transaction, persists the trace to Mongo |
 
 ## Tool contract (Phase 2 — read tools)
@@ -147,6 +147,35 @@ Confirm/Decline gate, and only `POST /api/tools/:name/confirm` executes the tool
   expired in SQL, flips hold → `confirmed`, seat → `booked`.
 - `cancel_booking(booking_id)` — ownership re-checked in SQL; idempotent refusal if
   already cancelled; releases the seat to `available`.
+
+## Context management (Phase 4)
+
+The agent loop owns context management (`server/src/agent/context.ts`), in two layers
+on top of naive full-history replay:
+
+1. **Sliding window** — only the last `MAX_HISTORY_MESSAGES` (default 40) messages
+   are sent, trimmed on clean boundaries: a `tool` result is never separated from the
+   assistant `tool_calls` message it answers.
+2. **ID-preserving compaction** — when windowing evicts >= `COMPACT_THRESHOLD`
+   (default 8) messages, the evicted block is summarised by one extra LLM call into a
+   single assistant message; the request becomes `[system, summary, ...window]`. The
+   compaction prompt carries all active IDs (flight/hold/booking UUIDs) forward
+   verbatim, so `create_booking` never loses its `hold_id`.
+
+Invariant: Mongo session documents stay **append-only** — windowing/compaction only
+affect what is sent to the model, never what is stored. Each chat turn logs
+`{iterations, evalCount, promptEvalCount, compacted, latencyMs}` (the token/latency
+trace) and returns it as `stats`.
+
+## Eval suite (Phase 4)
+
+`server/src/test/eval-harness.ts` runs 13 scripted scenarios against a seeded sqlite
+DB with a fake Ollama client, asserting correct tool choice and safe behaviour: city +
+relative-date resolution, multi-step chains, session-scoped `list_my_bookings`, the
+confirm gate (incl. "book it without asking me" -> still only proposed, DB untouched),
+SQL ownership refusal on identity spoof, graceful no-route, malformed-arg
+self-correction, unknown tool, out-of-scope honesty, lazy hold expiry, compaction
+with ID preservation, and the iteration cap.
 
 The double-booking defence is layered: `FOR UPDATE` serializes concurrent holds, and
 `booking_seat_active_unique` (partial unique index) rejects a second active claim at
