@@ -1,44 +1,134 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { createOllamaClient } from "../agent/ollama.ts";
-import { driveLoop } from "../agent/loop.ts";
+import { driveLoop, type LoopEvent } from "../agent/loop.ts";
 import { buildSystemPrompt } from "../agent/prompt.ts";
 import { config } from "../config.ts";
 import { pgQueryable } from "../db/postgres.ts";
-import { sessions, type StoredMessage } from "../db/mongo.ts";
+import { sessions, type StoredMessage, type SessionDoc } from "../db/mongo.ts";
 import { routeBriefLoader } from "../db/routes.ts";
 import { createToolRegistry } from "../tools/registry.ts";
+import { formatSse } from "./sse.ts";
 
 const chatBody = z.object({
   sessionId: z.string().uuid(),
   message: z.string().min(1).max(4000),
 });
 
-export async function chatRoutes(app: FastifyInstance): Promise<void> {
-  app.post("/api/chat", async (req, reply) => {
-    const parsed = chatBody.safeParse(req.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: "sessionId (uuid) and message are required" });
-    }
-    const { sessionId, message } = parsed.data;
-    const session = await sessions().findOne({ _id: sessionId });
-    if (!session) {
-      return reply.code(404).send({ error: "unknown session — log in first" });
-    }
+async function loadChatContext(
+  req: FastifyRequest,
+  reply: FastifyReply,
+): Promise<{
+  session: SessionDoc;
+  sessionId: string;
+  message: string;
+  systemPrompt: string;
+  registry: ReturnType<typeof createToolRegistry>;
+  persist: (messages: StoredMessage[]) => Promise<void>;
+} | null> {
+  const parsed = chatBody.safeParse(req.body);
+  if (!parsed.success) {
+    await reply.code(400).send({ error: "sessionId (uuid) and message are required" });
+    return null;
+  }
+  const { sessionId, message } = parsed.data;
+  const session = await sessions().findOne({ _id: sessionId });
+  if (!session) {
+    await reply.code(404).send({ error: "unknown session — log in first" });
+    return null;
+  }
+  const routeBrief = await routeBriefLoader.load();
+  const systemPrompt = buildSystemPrompt({
+    now: new Date(),
+    routeBrief,
+    holdMinutes: config.holdMinutes,
+  });
+  const registry = createToolRegistry(pgQueryable, { holdMinutes: config.holdMinutes });
+  const persist = async (messages: StoredMessage[]) => {
+    await sessions().updateOne(
+      { _id: sessionId },
+      { $push: { messages: { $each: messages } } },
+    );
+  };
+  return { session, sessionId, message, systemPrompt, registry, persist };
+}
 
-    const routeBrief = await routeBriefLoader.load();
-    const systemPrompt = buildSystemPrompt({
-      now: new Date(),
-      routeBrief,
-      holdMinutes: config.holdMinutes,
-    });
-    const registry = createToolRegistry(pgQueryable, { holdMinutes: config.holdMinutes });
-    const persist = async (messages: StoredMessage[]) => {
-      await sessions().updateOne(
-        { _id: sessionId },
-        { $push: { messages: { $each: messages } } },
-      );
+const SSE_HEADERS = {
+  "content-type": "text/event-stream",
+  "cache-control": "no-cache",
+  connection: "keep-alive",
+  "access-control-allow-origin": config.webOrigin,
+  "access-control-allow-credentials": "true",
+} as const;
+
+export async function chatRoutes(app: FastifyInstance): Promise<void> {
+  app.post("/api/chat/stream", async (req, reply) => {
+    const ctx = await loadChatContext(req, reply);
+    if (!ctx) return reply;
+    const { session, sessionId, message, systemPrompt, registry, persist } = ctx;
+
+    reply.hijack();
+    reply.raw.writeHead(200, SSE_HEADERS);
+    const send = (event: string, data: unknown) => {
+      reply.raw.write(formatSse(event, data));
     };
+    const abort = new AbortController();
+    req.raw.on("close", () => abort.abort());
+
+    const started = Date.now();
+    const onEvent = async (event: LoopEvent) => {
+      if (event.type === "done") {
+        send("done", {
+          sessionId,
+          reply: event.reply,
+          toolTrace: event.toolTrace,
+          pendingConfirmation: event.pendingConfirmation,
+          stats: {
+            iterations: event.iterations,
+            evalCount: event.evalCount,
+            promptEvalCount: event.promptEvalCount,
+            compacted: event.compacted,
+            latencyMs: Date.now() - started,
+          },
+        });
+      } else {
+        send(event.type, event);
+      }
+    };
+
+    try {
+      await driveLoop({
+        client: createOllamaClient(config.ollamaUrl),
+        model: config.ollamaModel,
+        systemPrompt,
+        history: session.messages,
+        userMessage: message,
+        tools: registry.tools,
+        ctx: { userRef: session.user_ref, displayName: session.display_name },
+        maxIterations: 8,
+        context: {
+          maxMessages: config.maxHistoryMessages,
+          compactThreshold: config.compactThreshold,
+        },
+        signal: abort.signal,
+        onEvent,
+        persist,
+      });
+    } catch (err) {
+      req.log.error(err);
+      if (!abort.signal.aborted) {
+        send("error", { error: `agent backend failed: ${(err as Error).message}` });
+      }
+    } finally {
+      reply.raw.end();
+    }
+    return reply;
+  });
+
+  app.post("/api/chat", async (req, reply) => {
+    const ctx = await loadChatContext(req, reply);
+    if (!ctx) return reply;
+    const { session, sessionId, message, systemPrompt, registry, persist } = ctx;
 
     try {
       const started = Date.now();

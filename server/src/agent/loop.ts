@@ -25,6 +25,22 @@ export interface LoopResult {
   compacted: boolean;
 }
 
+export type LoopEvent =
+  | { type: "typing" }
+  | { type: "token"; text: string }
+  | { type: "tool"; name: string; status: ToolTraceEntry["status"]; summary: string }
+  | { type: "confirm"; pending: PendingConfirmation }
+  | {
+      type: "done";
+      reply: string;
+      toolTrace: ToolTraceEntry[];
+      pendingConfirmation: PendingConfirmation | null;
+      iterations: number;
+      evalCount: number;
+      promptEvalCount: number;
+      compacted: boolean;
+    };
+
 export const DEFAULT_MAX_ITERATIONS = 8;
 
 function summarize(name: string, result: unknown): string {
@@ -49,6 +65,8 @@ export async function driveLoop(opts: {
   ctx: ToolContext;
   maxIterations?: number;
   context?: ContextOptions;
+  signal?: AbortSignal;
+  onEvent?: (event: LoopEvent) => void | Promise<void>;
   persist?: (messages: StoredMessage[]) => Promise<void>;
 }): Promise<LoopResult> {
   const {
@@ -61,6 +79,8 @@ export async function driveLoop(opts: {
     ctx,
     maxIterations = DEFAULT_MAX_ITERATIONS,
     context,
+    signal,
+    onEvent,
     persist,
   } = opts;
 
@@ -101,13 +121,18 @@ export async function driveLoop(opts: {
 
   for (let i = 0; i < maxIterations; i++) {
     iterations = i + 1;
+    await onEvent?.({ type: "typing" });
     const chunks: ChatChunk[] = [];
     for await (const chunk of client.chat({
       model,
       messages,
       tools: tools.map((t) => t.toOllamaSchema()),
+      ...(signal ? { signal } : {}),
     })) {
       chunks.push(chunk);
+      if (chunk.message?.content) {
+        await onEvent?.({ type: "token", text: chunk.message.content });
+      }
     }
     const { message, evalCount: evals, promptEvalCount: promptEvals } = assembleChat(chunks);
     if (evals) evalCount = evals;
@@ -118,7 +143,9 @@ export async function driveLoop(opts: {
       if (persist) {
         await persist([{ role: "assistant", content: reply, ts: now() }]);
       }
-      return { reply, toolTrace, pendingConfirmation, iterations, evalCount, promptEvalCount, compacted };
+      const result: LoopResult = { reply, toolTrace, pendingConfirmation, iterations, evalCount, promptEvalCount, compacted };
+      await onEvent?.({ type: "done", ...result });
+      return result;
     }
 
     const assistantMessage: OllamaMessage = {
@@ -170,7 +197,12 @@ export async function driveLoop(opts: {
           }
         }
       }
-      toolTrace.push({ name: call.function.name, status, summary: summarize(call.function.name, result) });
+      const summary = summarize(call.function.name, result);
+      toolTrace.push({ name: call.function.name, status, summary });
+      await onEvent?.({ type: "tool", name: call.function.name, status, summary });
+      if (status === "pending_confirmation" && pendingConfirmation) {
+        await onEvent?.({ type: "confirm", pending: pendingConfirmation });
+      }
       const toolMessage: OllamaMessage = {
         role: "tool",
         tool_call_id: call.id,
@@ -194,5 +226,7 @@ export async function driveLoop(opts: {
   if (persist) {
     await persist([{ role: "assistant", content: reply, ts: now() }]);
   }
-  return { reply, toolTrace, pendingConfirmation, iterations, evalCount, promptEvalCount, compacted };
+  const result: LoopResult = { reply, toolTrace, pendingConfirmation, iterations, evalCount, promptEvalCount, compacted };
+  await onEvent?.({ type: "done", ...result });
+  return result;
 }

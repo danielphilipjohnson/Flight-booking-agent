@@ -56,23 +56,64 @@ export default function Chat() {
     setInput("");
     setBusy(true);
     setError(null);
-    setMessages((m) => [...m, { role: "user", content: text }]);
+    setPending(null);
+    setMessages((m) => [...m, { role: "user", content: text }, { role: "assistant", content: "", toolTrace: [] }]);
     try {
-      const res = await fetch("/api/chat", {
+      const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ sessionId, message: text }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = await res.json();
-      setMessages((m) => [
-        ...m,
-        { role: "assistant", content: body.reply, toolTrace: body.toolTrace },
-      ]);
-      if (body.pendingConfirmation) {
-        setPending(body.pendingConfirmation as PendingConfirmation);
-      } else {
-        setPending(null);
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const handleEvent = (event: string, data: string) => {
+        const parsed = JSON.parse(data);
+        if (event === "token") {
+          setMessages((m) => {
+            const copy = [...m];
+            const last = copy[copy.length - 1]!;
+            copy[copy.length - 1] = { ...last, content: last.content + parsed.text };
+            return copy;
+          });
+        } else if (event === "tool") {
+          setMessages((m) => {
+            const copy = [...m];
+            const last = copy[copy.length - 1]!;
+            copy[copy.length - 1] = {
+              ...last,
+              toolTrace: [...(last.toolTrace ?? []), { name: parsed.name, status: parsed.status, summary: parsed.summary }],
+            };
+            return copy;
+          });
+        } else if (event === "confirm") {
+          setPending(parsed.pending as PendingConfirmation);
+        } else if (event === "done") {
+          setMessages((m) => {
+            const copy = [...m];
+            copy[copy.length - 1] = { role: "assistant", content: parsed.reply, toolTrace: parsed.toolTrace };
+            return copy;
+          });
+          if (parsed.pendingConfirmation) setPending(parsed.pendingConfirmation as PendingConfirmation);
+        } else if (event === "error") {
+          throw new Error(parsed.error);
+        }
+      };
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundary = buffer.indexOf("\n\n");
+        while (boundary >= 0) {
+          const raw = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const lines = raw.split("\n");
+          const event = lines.find((l) => l.startsWith("event: "))?.slice(7) ?? "message";
+          const data = lines.filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("\n");
+          if (data) handleEvent(event, data);
+          boundary = buffer.indexOf("\n\n");
+        }
       }
     } catch (err) {
       setError((err as Error).message);
@@ -158,7 +199,10 @@ export default function Chat() {
         )}
         {messages.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
-            <div className="bubble">{m.content}</div>
+            <div className="bubble">
+              {m.content}
+              {m.role === "assistant" && busy && i === messages.length - 1 && <span className="caret">▌</span>}
+            </div>
             {m.toolTrace && m.toolTrace.length > 0 && (
               <div className="chips">
                 {m.toolTrace.map((t, j) => (
@@ -170,7 +214,6 @@ export default function Chat() {
             )}
           </div>
         ))}
-        {busy && <div className="msg assistant"><div className="bubble muted">thinking…</div></div>}
         {pending && (
           <div className="msg assistant">
             <div className="bubble confirm-card">
