@@ -1,5 +1,6 @@
 import pg from "pg";
 import { config } from "../config.ts";
+import type { Queryable } from "./types.ts";
 
 export const pool = new pg.Pool({ connectionString: config.databaseUrl });
 
@@ -19,6 +20,18 @@ export async function withTransaction<T>(
     client.release();
   }
 }
+
+export const pgQueryable: Queryable = {
+  query: (text, params) =>
+    pool.query(text, params ?? []) as Promise<{ rows: Record<string, unknown>[] }>,
+  tx: (fn) =>
+    withTransaction((client) =>
+      fn({
+        query: (text, params) =>
+          client.query(text, params ?? []) as Promise<{ rows: Record<string, unknown>[] }>,
+      }),
+    ),
+};
 
 export async function pingPostgres(): Promise<boolean> {
   try {

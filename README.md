@@ -111,7 +111,7 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 | --- | --- | --- |
 | 1. Foundations | Repo scaffold, Docker Compose, schema, deterministic seed | `docker compose up` + `npm run seed` gives queryable data (PR #1, merged) |
 | 2. Read-only agent | Agent loop, 4 read tools, Ollama tool-calling, chat UI, Mongo history | "flights to Lisbon tomorrow" → correct multi-step tool calls; per-user history survives restart (this PR) |
-| 3. Booking + transactions | hold/create/cancel, `FOR UPDATE`, confirm gate, concurrency test | Two parallel booking attempts → exactly one wins |
+| 3. Booking + transactions | hold/create/cancel, `FOR UPDATE`, confirm gate, concurrency test | Two parallel booking attempts → exactly one wins (this PR) |
 | 4. Hardening + evals | Retry on malformed args, iteration cap, sliding-window history, eval set | Eval suite passes; "book without asking" is refused |
 | 5. Portfolio polish | README diagram, concurrency write-up, demo recording | Reviewer clones, `compose up`, books a seat in <10 min |
 
@@ -123,8 +123,8 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 | `POST /api/login` | Mock auth: `{user_ref, pin}` → `{sessionId}` (session bound to user in Mongo) |
 | `POST /api/chat` | `{sessionId, message}` → runs the agent loop, returns `{reply, toolTrace, pendingConfirmation}`; every turn `$push`-ed to Mongo |
 | `GET /api/sessions/:id` | History from Mongo, per-user scoped |
-| `POST /api/chat/stream` | SSE twin: typing / token / tool / confirm / done / error events (Phase 3+) |
-| `POST /api/tools/:name/confirm` | Confirm-before-write gate for hold/create/cancel (Phase 3) |
+| `POST /api/chat/stream` | SSE twin: typing / token / tool / confirm / done / error events (Phase 4) |
+| `POST /api/tools/:name/confirm` | `{sessionId, args}` → executes a confirm-gated write tool in a transaction, persists the trace to Mongo |
 
 ## Tool contract (Phase 2 — read tools)
 
@@ -135,5 +135,20 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 | `list_available_seats` | `flight_id`, `class?` | `{ available_seats: [{ seat_no, class, price }] }` |
 | `list_my_bookings` | — (session identity injected) | `{ bookings: [...] }`, cancelled excluded by SQL |
 
-Write tools (`hold_seat`, `create_booking`, `cancel_booking`) land in Phase 3 and are
-confirm-gated: the loop never executes them, it returns a `pendingConfirmation`.
+Write tools (`hold_seat`, `create_booking`, `cancel_booking`) are confirm-gated: the
+agent loop never executes them — it returns a `pendingConfirmation`, the UI shows a
+Confirm/Decline gate, and only `POST /api/tools/:name/confirm` executes the tool
+(re-validated with Zod, session identity injected, run inside a transaction with
+`SELECT ... FOR UPDATE`). Tool-level failures come back as clean errors.
+
+- `hold_seat(flight_id, seat_no, hold_minutes?)` — row-locks the seat, rejects
+  non-available seats, creates a `held` booking + active `booking_seat` claim.
+- `create_booking(hold_id, passenger_name)` — re-verifies ownership / held / not
+  expired in SQL, flips hold → `confirmed`, seat → `booked`.
+- `cancel_booking(booking_id)` — ownership re-checked in SQL; idempotent refusal if
+  already cancelled; releases the seat to `available`.
+
+The double-booking defence is layered: `FOR UPDATE` serializes concurrent holds, and
+`booking_seat_active_unique` (partial unique index) rejects a second active claim at
+storage level — proven by the booking harness (two parallel `hold_seat` calls on the
+same seat → exactly one wins, one active claim).

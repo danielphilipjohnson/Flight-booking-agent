@@ -3,6 +3,7 @@ import type { OllamaToolSchema } from "../agent/ollama.ts";
 
 export interface ToolContext {
   userRef: string;
+  displayName?: string;
 }
 
 export interface ToolDef {
@@ -30,6 +31,21 @@ export const listAvailableSeatsInput = z.object({
 });
 
 export const listMyBookingsInput = z.object({});
+
+export const holdSeatInput = z.object({
+  flight_id: z.string().uuid(),
+  seat_no: z.string().regex(/^([1-9]|1[0-2])[A-F]$/, "seat like 12A"),
+  hold_minutes: z.number().int().min(1).max(60).optional(),
+});
+
+export const createBookingInput = z.object({
+  hold_id: z.string().uuid(),
+  passenger_name: z.string().min(1).max(100),
+});
+
+export const cancelBookingInput = z.object({
+  booking_id: z.string().uuid(),
+});
 
 export function toolToOllamaSchema(def: {
   name: string;

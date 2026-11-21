@@ -13,6 +13,7 @@ export interface StoredMessage {
 export interface SessionDoc {
   _id: string;
   user_ref: string;
+  display_name: string;
   created_at: Date;
   messages: StoredMessage[];
 }

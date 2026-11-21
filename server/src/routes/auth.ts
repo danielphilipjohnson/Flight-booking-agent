@@ -27,6 +27,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     await sessions().insertOne({
       _id: sessionId,
       user_ref,
+      display_name: String(rows[0]!.display_name),
       created_at: new Date(),
       messages: [],
     });
