@@ -1,8 +1,20 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import {
+  appendAssistantNote,
+  appendAssistantPlaceholder,
+  appendTokenToLastAssistant,
+  appendToolChip,
+  appendUserTurn,
+  finalizeLastAssistant,
+  removeEmptyTrailingAssistant,
+  streamChatTurn,
+  type ChatMessage,
+  type PendingConfirmation,
+} from "../lib/chatStream.ts";
 
-const MOCK_USERS = [
+const FALLBACK_USERS = [
   { user_ref: "ava", display_name: "Ava" },
   { user_ref: "ben", display_name: "Ben" },
   { user_ref: "chloe", display_name: "Chloe" },
@@ -10,38 +22,46 @@ const MOCK_USERS = [
   { user_ref: "elena", display_name: "Elena" },
 ];
 
-interface ChatMessage {
-  role: "user" | "assistant";
-  content: string;
-  toolTrace?: { name: string; status: string; summary: string }[];
-}
-
-interface PendingConfirmation {
-  tool: string;
-  args: Record<string, unknown>;
-}
+type ChatState =
+  | { stage: "idle" }
+  | { stage: "streaming" }
+  | { stage: "awaiting_confirmation"; pending: PendingConfirmation }
+  | { stage: "confirming"; pending: PendingConfirmation }
+  | { stage: "failed"; error: string };
 
 export default function Chat() {
+  const [users, setUsers] = useState(FALLBACK_USERS);
   const [userRef, setUserRef] = useState("ava");
   const [pin, setPin] = useState("4321");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState<PendingConfirmation | null>(null);
+  const [chat, setChat] = useState<ChatState>({ stage: "idle" });
+
+  const busy = chat.stage === "streaming" || chat.stage === "confirming";
+  const canCompose =
+    chat.stage === "idle" || chat.stage === "failed";
+
+  useEffect(() => {
+    fetch("/api/users")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => {
+        if (body?.users?.length) setUsers(body.users);
+      })
+      .catch(() => {});
+  }, []);
 
   async function login(e: React.FormEvent) {
     e.preventDefault();
-    setError(null);
+    setChat({ stage: "idle" });
     const res = await fetch("/api/login", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ user_ref: userRef, pin }),
     });
     if (!res.ok) {
-      setError("Invalid user or PIN");
+      setChat({ stage: "failed", error: "Invalid user or PIN" });
       return;
     }
     const body = await res.json();
@@ -51,86 +71,55 @@ export default function Chat() {
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
-    if (!sessionId || !input.trim() || busy) return;
+    if (!sessionId || !input.trim() || !canCompose) return;
     const text = input.trim();
     setInput("");
-    setBusy(true);
-    setError(null);
-    setPending(null);
-    setMessages((m) => [...m, { role: "user", content: text }, { role: "assistant", content: "", toolTrace: [] }]);
+    setChat({ stage: "streaming" });
+    setMessages((m) => appendAssistantPlaceholder(appendUserTurn(m, text)));
     try {
-      const res = await fetch("/api/chat/stream", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, message: text }),
+      await streamChatTurn({ sessionId, message: text }, (event) => {
+        switch (event.type) {
+          case "token":
+            setMessages((m) => appendTokenToLastAssistant(m, event.text));
+            break;
+          case "tool":
+            setMessages((m) => appendToolChip(m, event));
+            break;
+          case "confirm":
+            setChat({ stage: "awaiting_confirmation", pending: event.pending });
+            break;
+          case "done":
+            setMessages((m) => finalizeLastAssistant(m, event.reply, event.toolTrace));
+            setChat((c) =>
+              c.stage === "awaiting_confirmation"
+                ? c
+                : event.pendingConfirmation
+                  ? { stage: "awaiting_confirmation", pending: event.pendingConfirmation }
+                  : { stage: "idle" },
+            );
+            break;
+          case "error":
+            throw new Error(event.error);
+          case "typing":
+            break;
+        }
       });
-      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      const handleEvent = (event: string, data: string) => {
-        const parsed = JSON.parse(data);
-        if (event === "token") {
-          setMessages((m) => {
-            const copy = [...m];
-            const last = copy[copy.length - 1]!;
-            copy[copy.length - 1] = { ...last, content: last.content + parsed.text };
-            return copy;
-          });
-        } else if (event === "tool") {
-          setMessages((m) => {
-            const copy = [...m];
-            const last = copy[copy.length - 1]!;
-            copy[copy.length - 1] = {
-              ...last,
-              toolTrace: [...(last.toolTrace ?? []), { name: parsed.name, status: parsed.status, summary: parsed.summary }],
-            };
-            return copy;
-          });
-        } else if (event === "confirm") {
-          setPending(parsed.pending as PendingConfirmation);
-        } else if (event === "done") {
-          setMessages((m) => {
-            const copy = [...m];
-            copy[copy.length - 1] = { role: "assistant", content: parsed.reply, toolTrace: parsed.toolTrace };
-            return copy;
-          });
-          if (parsed.pendingConfirmation) setPending(parsed.pendingConfirmation as PendingConfirmation);
-        } else if (event === "error") {
-          throw new Error(parsed.error);
-        }
-      };
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let boundary = buffer.indexOf("\n\n");
-        while (boundary >= 0) {
-          const raw = buffer.slice(0, boundary);
-          buffer = buffer.slice(boundary + 2);
-          const lines = raw.split("\n");
-          const event = lines.find((l) => l.startsWith("event: "))?.slice(7) ?? "message";
-          const data = lines.filter((l) => l.startsWith("data: ")).map((l) => l.slice(6)).join("\n");
-          if (data) handleEvent(event, data);
-          boundary = buffer.indexOf("\n\n");
-        }
-      }
+      setChat((c) => (c.stage === "streaming" ? { stage: "idle" } : c));
     } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
+      setMessages((m) => removeEmptyTrailingAssistant(m));
+      setChat({ stage: "failed", error: (err as Error).message });
     }
   }
 
   async function decide(confirm: boolean) {
-    if (!pending || !sessionId) return;
+    if (chat.stage !== "awaiting_confirmation" || !sessionId) return;
+    const pending = chat.pending;
     if (!confirm) {
-      setPending(null);
-      setMessages((m) => [...m, { role: "assistant", content: "Declined — no changes were made." }]);
+      setChat({ stage: "idle" });
+      setMessages((m) => appendAssistantNote(m, "Declined — no changes were made."));
       return;
     }
-    setBusy(true);
-    setError(null);
+    setChat({ stage: "confirming", pending });
     try {
       const res = await fetch(`/api/tools/${pending.tool}/confirm`, {
         method: "POST",
@@ -139,22 +128,17 @@ export default function Chat() {
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      setMessages((m) => [
-        ...m,
-        {
-          role: "assistant",
-          content: `Confirmed: ${pending.tool} → ${JSON.stringify(body.result)}`,
-          toolTrace: [{ name: pending.tool, status: "ok", summary: "confirmed & executed" }],
-        },
-      ]);
+      setMessages((m) =>
+        appendAssistantNote(
+          m,
+          `Confirmed: ${pending.tool} → ${JSON.stringify(body.result)}`,
+          [{ name: pending.tool, status: "ok", summary: "confirmed & executed" }],
+        ),
+      );
+      setChat({ stage: "idle" });
     } catch (err) {
-      setMessages((m) => [
-        ...m,
-        { role: "assistant", content: `Confirmation failed: ${(err as Error).message}` },
-      ]);
-    } finally {
-      setPending(null);
-      setBusy(false);
+      setMessages((m) => appendAssistantNote(m, `Confirmation failed: ${(err as Error).message}`));
+      setChat({ stage: "failed", error: (err as Error).message });
     }
   }
 
@@ -164,7 +148,7 @@ export default function Chat() {
         <h1>Flight Booking Agent</h1>
         <p className="muted">Mock login — demo PIN is 4321 for every user.</p>
         <select value={userRef} onChange={(e) => setUserRef(e.target.value)}>
-          {MOCK_USERS.map((u) => (
+          {users.map((u) => (
             <option key={u.user_ref} value={u.user_ref}>
               {u.display_name} ({u.user_ref})
             </option>
@@ -177,7 +161,7 @@ export default function Chat() {
           inputMode="numeric"
         />
         <button type="submit">Log in</button>
-        {error && <p className="error">{error}</p>}
+        {chat.stage === "failed" && <p className="error">{chat.error}</p>}
       </form>
     );
   }
@@ -197,11 +181,15 @@ export default function Chat() {
             bookings?&rdquo;
           </p>
         )}
-        {messages.map((m, i) => (
-          <div key={i} className={`msg ${m.role}`}>
+        {messages.map((m) => (
+          <div key={m.id} className={`msg ${m.role}`}>
             <div className="bubble">
               {m.content}
-              {m.role === "assistant" && busy && i === messages.length - 1 && <span className="caret">▌</span>}
+              {m.role === "assistant" &&
+                chat.stage === "streaming" &&
+                m.id === messages[messages.length - 1]!.id && (
+                  <span className="caret">▌</span>
+                )}
             </div>
             {m.toolTrace && m.toolTrace.length > 0 && (
               <div className="chips">
@@ -214,11 +202,11 @@ export default function Chat() {
             )}
           </div>
         ))}
-        {pending && (
+        {chat.stage === "awaiting_confirmation" && (
           <div className="msg assistant">
             <div className="bubble confirm-card">
-              <strong>Confirm write:</strong> {pending.tool}{" "}
-              <code>{JSON.stringify(pending.args)}</code>
+              <strong>Confirm write:</strong> {chat.pending.tool}{" "}
+              <code>{JSON.stringify(chat.pending.args)}</code>
               <div className="confirm-actions">
                 <button onClick={() => decide(true)} disabled={busy}>
                   Confirm
@@ -231,15 +219,19 @@ export default function Chat() {
           </div>
         )}
       </div>
-      {error && <p className="error">{error}</p>}
+      {chat.stage === "failed" && <p className="error">{chat.error}</p>}
       <form className="composer" onSubmit={send}>
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask about flights or your bookings…"
-          disabled={busy}
+          placeholder={
+            chat.stage === "awaiting_confirmation"
+              ? "Resolve the confirmation above first…"
+              : "Ask about flights or your bookings…"
+          }
+          disabled={!canCompose}
         />
-        <button type="submit" disabled={busy || !input.trim()}>
+        <button type="submit" disabled={!canCompose || !input.trim()}>
           Send
         </button>
       </form>
