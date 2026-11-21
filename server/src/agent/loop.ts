@@ -1,4 +1,5 @@
 import { assembleChat, type ChatChunk, type OllamaClient, type OllamaMessage } from "./ollama.ts";
+import { selectContext, type ContextOptions } from "./context.ts";
 import { toOllamaMessages } from "./prompt.ts";
 import type { ToolContext, ToolDef } from "../tools/schemas.ts";
 import type { StoredMessage } from "../db/mongo.ts";
@@ -20,6 +21,8 @@ export interface LoopResult {
   pendingConfirmation: PendingConfirmation | null;
   iterations: number;
   evalCount: number;
+  promptEvalCount: number;
+  compacted: boolean;
 }
 
 export const DEFAULT_MAX_ITERATIONS = 8;
@@ -45,6 +48,7 @@ export async function driveLoop(opts: {
   tools: ToolDef[];
   ctx: ToolContext;
   maxIterations?: number;
+  context?: ContextOptions;
   persist?: (messages: StoredMessage[]) => Promise<void>;
 }): Promise<LoopResult> {
   const {
@@ -56,11 +60,32 @@ export async function driveLoop(opts: {
     tools,
     ctx,
     maxIterations = DEFAULT_MAX_ITERATIONS,
+    context,
     persist,
   } = opts;
 
+  let compacted = false;
+  let historyForModel = history;
+  if (context) {
+    const compact =
+      context.compact ??
+      (async (prompt: string) => {
+        const chunks: ChatChunk[] = [];
+        for await (const chunk of client.chat({
+          model,
+          messages: [{ role: "user", content: prompt }],
+        })) {
+          chunks.push(chunk);
+        }
+        return assembleChat(chunks).message.content;
+      });
+    const selection = await selectContext(history, { ...context, compact });
+    historyForModel = selection.messages;
+    compacted = selection.compacted;
+  }
+
   const messages: OllamaMessage[] = [
-    ...toOllamaMessages(history, systemPrompt),
+    ...toOllamaMessages(historyForModel, systemPrompt),
     { role: "user", content: userMessage },
   ];
   const now = () => new Date();
@@ -71,6 +96,7 @@ export async function driveLoop(opts: {
   const toolTrace: ToolTraceEntry[] = [];
   let pendingConfirmation: PendingConfirmation | null = null;
   let evalCount = 0;
+  let promptEvalCount = 0;
   let iterations = 0;
 
   for (let i = 0; i < maxIterations; i++) {
@@ -83,15 +109,16 @@ export async function driveLoop(opts: {
     })) {
       chunks.push(chunk);
     }
-    const { message, evalCount: evals } = assembleChat(chunks);
+    const { message, evalCount: evals, promptEvalCount: promptEvals } = assembleChat(chunks);
     if (evals) evalCount = evals;
+    if (promptEvals) promptEvalCount = promptEvals;
 
     if (message.tool_calls.length === 0) {
       const reply = message.content;
       if (persist) {
         await persist([{ role: "assistant", content: reply, ts: now() }]);
       }
-      return { reply, toolTrace, pendingConfirmation, iterations, evalCount };
+      return { reply, toolTrace, pendingConfirmation, iterations, evalCount, promptEvalCount, compacted };
     }
 
     const assistantMessage: OllamaMessage = {
@@ -167,5 +194,5 @@ export async function driveLoop(opts: {
   if (persist) {
     await persist([{ role: "assistant", content: reply, ts: now() }]);
   }
-  return { reply, toolTrace, pendingConfirmation, iterations, evalCount };
+  return { reply, toolTrace, pendingConfirmation, iterations, evalCount, promptEvalCount, compacted };
 }
