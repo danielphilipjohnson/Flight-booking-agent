@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Queryable } from "../db/types.ts";
-import { iso, releaseExpiredHolds } from "./flights.ts";
+import { iso, releaseExpiredHoldsStatements } from "./flights.ts";
 import {
   cancelBookingInput,
   createBookingInput,
@@ -30,7 +30,7 @@ export function createBookingTools(db: Queryable, opts: { holdMinutes: number })
       const minutes = hold_minutes ?? opts.holdMinutes;
       return inTx(db, async (q) => {
         const now = new Date();
-        await releaseExpiredHolds(q, now);
+        await releaseExpiredHoldsStatements(q, now);
         const seats = (
           await q.query(
             "SELECT seat_no, class, price, status FROM seat WHERE flight_id = $1 AND seat_no = $2 FOR UPDATE",
@@ -50,10 +50,19 @@ export function createBookingTools(db: Queryable, opts: { holdMinutes: number })
           "UPDATE seat SET status = 'held', hold_expires_at = $3 WHERE flight_id = $1 AND seat_no = $2",
           [flight_id, seat_no, iso(holdExpiresAt)],
         );
-        await q.query(
-          "INSERT INTO booking_seat (booking_id, flight_id, seat_no, active) VALUES ($1, $2, $3, TRUE)",
-          [holdId, flight_id, seat_no],
-        );
+        try {
+          await q.query(
+            "INSERT INTO booking_seat (booking_id, flight_id, seat_no, active) VALUES ($1, $2, $3, TRUE)",
+            [holdId, flight_id, seat_no],
+          );
+        } catch (err) {
+          const code = (err as { code?: string }).code;
+          const message = (err as Error).message;
+          if (code === "23505" || /UNIQUE constraint failed/i.test(message)) {
+            return { error: `seat ${seat_no} was just taken by another booking` };
+          }
+          throw err;
+        }
         return {
           hold_id: holdId,
           seat_no,
@@ -93,7 +102,7 @@ export function createBookingTools(db: Queryable, opts: { holdMinutes: number })
       };
       return inTx(db, async (q) => {
         const now = new Date();
-        await releaseExpiredHolds(q, now);
+        await releaseExpiredHoldsStatements(q, now);
         const rows = (
           await q.query(
             "SELECT id, user_ref, status, hold_expires_at FROM booking WHERE id = $1 FOR UPDATE",

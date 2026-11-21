@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { seededQueryable } from "./fixtures.ts";
-import { uuidFor } from "../seed/generate.ts";
+import { seededQueryable, sqliteDb, loadSchemaSql, toQueryable } from "./fixtures.ts";
+import { generateDataset, uuidFor } from "../seed/generate.ts";
 import { createToolRegistry } from "../tools/registry.ts";
-import { iso } from "../tools/flights.ts";
+import { iso, releaseExpiredHolds } from "../tools/flights.ts";
 
 let passed = 0;
 function ok(condition: boolean, label: string): void {
@@ -71,7 +71,7 @@ ok(outcomes.join(",") === "error,ok", "exactly one of two parallel holds succeed
 const raceWinner = r1.ok ? "ava" : "ben";
 const avaRaceExtra = raceWinner === "ava" ? 1 : 0;
 const loser = [r1, r2].find((r) => !r.ok)!;
-ok(typeof loser.error === "string", "loser gets a clean error, not a crash: " + loser.error);
+ok(loser.error!.includes("was just taken"), "loser gets the clean mapped error (unique-violation -> friendly message, issue #9): " + loser.error);
 ok((await activeClaims(selloutId, "7D")).n === 1, "storage holds exactly one active claim on 7D");
 ok((await seatStatus(selloutId, "7D")) === "held", "seat 7D is held exactly once");
 const heldBookings = (await q.query("SELECT COUNT(*) AS n FROM booking WHERE status = 'held' AND id IN (SELECT booking_id FROM booking_seat WHERE flight_id = ? AND seat_no = '7D')", [selloutId])).rows[0] as { n: number };
@@ -125,5 +125,48 @@ try {
   threw = true;
 }
 ok(threw, "second ACTIVE claim on held seat 7D rejected by booking_seat_active_unique");
+
+console.log("\n# releaseExpiredHolds runs in ONE transaction and rolls back atomically (issue #6)");
+const data2 = generateDataset(42, { now: new Date("2026-11-20T12:00:00.000Z") });
+const db2 = sqliteDb(data2, await loadSchemaSql());
+const realQ = toQueryable(db2, { txMode: "real" });
+await realQ.query(
+  "INSERT INTO booking (id, user_ref, status, passenger_name, created_at, hold_expires_at) VALUES (?, 'elena', 'held', 'Elena', ?, ?)",
+  [uuidFor("booking:elena:tx"), iso(new Date("2026-11-20T10:00:00.000Z")), iso(new Date("2020-01-01T00:00:00.000Z"))],
+);
+const f2 = data2.flights[0]!;
+await realQ.query("UPDATE seat SET status = 'held', hold_expires_at = ? WHERE flight_id = ? AND seat_no = '1A'", [iso(new Date("2020-01-01T00:00:00.000Z")), f2.id]);
+await realQ.query("INSERT INTO booking_seat (booking_id, flight_id, seat_no, active) VALUES (?, ?, '1A', TRUE)", [uuidFor("booking:elena:tx"), f2.id]);
+const released = await releaseExpiredHolds(realQ, new Date("2026-11-21T00:00:00.000Z"));
+ok(released === 1, "expired hold released inside a real transaction");
+const st = (await realQ.query("SELECT status FROM booking WHERE id = ?", [uuidFor("booking:elena:tx")])).rows[0] as { status: string };
+ok(st.status === "cancelled", "booking cancelled after tx commit");
+
+await realQ.query(
+  "INSERT INTO booking (id, user_ref, status, passenger_name, created_at, hold_expires_at) VALUES (?, 'elena', 'held', 'Elena', ?, ?)",
+  [uuidFor("booking:elena:tx2"), iso(new Date("2026-11-20T10:00:00.000Z")), iso(new Date("2020-01-01T00:00:00.000Z"))],
+);
+await realQ.query("UPDATE seat SET status = 'held', hold_expires_at = ? WHERE flight_id = ? AND seat_no = '1B'", [iso(new Date("2020-01-01T00:00:00.000Z")), f2.id]);
+await realQ.query("INSERT INTO booking_seat (booking_id, flight_id, seat_no, active) VALUES (?, ?, '1B', TRUE)", [uuidFor("booking:elena:tx2"), f2.id]);
+const failingQ = toQueryable(db2, { txMode: "real" });
+const origQuery = failingQ.query.bind(failingQ);
+let failNext = false;
+failingQ.query = async (text, params) => {
+  if (failNext && text.includes("UPDATE seat")) throw new Error("simulated mid-transaction failure");
+  return origQuery(text, params);
+};
+failNext = true;
+let txThrew = false;
+try {
+  await releaseExpiredHolds(failingQ, new Date("2026-11-21T00:00:00.000Z"));
+} catch {
+  txThrew = true;
+}
+ok(txThrew, "mid-transaction failure propagates");
+failNext = false;
+const b2 = (await realQ.query("SELECT status FROM booking WHERE id = ?", [uuidFor("booking:elena:tx2")])).rows[0] as { status: string };
+const s2 = (await realQ.query("SELECT status FROM seat WHERE flight_id = ? AND seat_no = '1B'", [f2.id])).rows[0] as { status: string };
+const c2 = (await realQ.query("SELECT active FROM booking_seat WHERE booking_id = ?", [uuidFor("booking:elena:tx2")])).rows[0] as { active: number };
+ok(b2.status === "held" && s2.status === "held" && c2.active === 1, "ROLLBACK left booking/seat/claim untouched — all three statements are atomic");
 
 console.log(`\n${passed} assertions passed`);

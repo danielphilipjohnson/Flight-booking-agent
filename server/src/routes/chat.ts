@@ -9,6 +9,7 @@ import { sessions, type StoredMessage, type SessionDoc } from "../db/mongo.ts";
 import { routeBriefLoader } from "../db/routes.ts";
 import { createToolRegistry } from "../tools/registry.ts";
 import { formatSse } from "./sse.ts";
+import type { SummaryCache } from "../agent/context.ts";
 
 const chatBody = z.object({
   sessionId: z.string().uuid(),
@@ -25,6 +26,7 @@ async function loadChatContext(
   systemPrompt: string;
   registry: ReturnType<typeof createToolRegistry>;
   persist: (messages: StoredMessage[]) => Promise<void>;
+  summaryCache: SummaryCache;
 } | null> {
   const parsed = chatBody.safeParse(req.body);
   if (!parsed.success) {
@@ -50,7 +52,16 @@ async function loadChatContext(
       { $push: { messages: { $each: messages } } },
     );
   };
-  return { session, sessionId, message, systemPrompt, registry, persist };
+  const summaryCache: SummaryCache = {
+    get: () => session.context_summary ?? null,
+    set: (value) => {
+      void sessions().updateOne(
+        { _id: sessionId },
+        { $set: { context_summary: value } },
+      );
+    },
+  };
+  return { session, sessionId, message, systemPrompt, registry, persist, summaryCache };
 }
 
 const SSE_HEADERS = {
@@ -109,6 +120,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         context: {
           maxMessages: config.maxHistoryMessages,
           compactThreshold: config.compactThreshold,
+          summaryCache: ctx.summaryCache,
         },
         signal: abort.signal,
         onEvent,
@@ -144,6 +156,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         context: {
           maxMessages: config.maxHistoryMessages,
           compactThreshold: config.compactThreshold,
+          summaryCache: ctx.summaryCache,
         },
         persist,
       });
