@@ -57,16 +57,16 @@ user (browser) --> Next.js chat UI --> POST /api/chat (SSE) --> Fastify agent AP
 │       │   ├── routes.ts   # cached route brief (airport table -> prompt)
 │       │   ├── types.ts    # Queryable interface (pg or sqlite in tests)
 │       │   └── schema.sql  # tables, constraints, ownership scoping
-│       ├── routes/         # /api/health, /api/login, /api/chat, /api/sessions/:id
+│       ├── routes/         # /api/health, /api/login, /api/conversations, /api/chat, /api/sessions/:id
 │       ├── tools/
 │       │   ├── schemas.ts  # Zod schemas + tool registry types
 │       │   └── flights.ts  # 4 read tools (search/details/seats/my bookings)
 │       ├── seed/           # deterministic dataset generator + seed CLI + harness
 │       └── test/           # tools / prompt / loop harnesses (run without Docker)
-└── web/                    # Next.js chat UI (mock-user login + tool chips)
+└── web/                    # Next.js UI: login -> conversations list -> chat
     └── src/
-        ├── app/
-        └── components/Chat.tsx
+        ├── app/            # / (conversations) and /chat/[sessionId]
+        └── components/     # Login, Conversations, Chat, Markdown
 ```
 
 ## Getting started
@@ -134,9 +134,12 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 | Method + path | Purpose |
 | --- | --- |
 | `GET /api/health` | 200 when Postgres + Mongo reachable |
-| `POST /api/login` | Mock auth: `{user_ref, pin}` → `{sessionId}` (session bound to user in Mongo) |
+| `GET /api/users` | Demo users for the login picker (no PINs) |
+| `POST /api/login` | Mock auth: `{user_ref, pin}` → `{user_ref, display_name}` |
+| `GET /api/users/:userRef/conversations` | Conversations for one user, newest activity first (title, preview, message count) |
+| `POST /api/conversations` | `{user_ref}` → creates a new empty conversation, returns `{sessionId}` |
 | `POST /api/chat` | `{sessionId, message}` → runs the agent loop, returns `{reply, toolTrace, pendingConfirmation, stats}`; every turn `$push`-ed to Mongo |
-| `GET /api/sessions/:id` | History from Mongo, per-user scoped |
+| `GET /api/sessions/:id` | Conversation metadata + history from Mongo |
 | `POST /api/chat/stream` | SSE twin of `/api/chat`: `typing` / `token` / `tool` / `confirm` / `done` / `error` events; client disconnect aborts the Ollama call |
 | `POST /api/tools/:name/confirm` | `{sessionId, args}` → executes a confirm-gated write tool in a transaction, persists the trace to Mongo |
 

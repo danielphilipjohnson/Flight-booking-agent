@@ -7,6 +7,7 @@ import { buildSystemPrompt } from "../agent/prompt.ts";
 import { config } from "../config.ts";
 import { pgQueryable } from "../db/postgres.ts";
 import { sessions, type StoredMessage, type SessionDoc } from "../db/mongo.ts";
+import { titleFromUserMessage } from "../db/conversations.ts";
 import { routeBriefLoader } from "../db/routes.ts";
 import { createToolRegistry } from "../tools/registry.ts";
 import { formatSse } from "./sse.ts";
@@ -60,9 +61,17 @@ async function loadChatContext(
   });
   const registry = createToolRegistry(pgQueryable, { holdMinutes: config.holdMinutes });
   const persist = async (messages: StoredMessage[]) => {
+    const set: Record<string, unknown> = { updated_at: new Date() };
+    // Name the conversation after its first real user message, once.
+    if (!session.title) {
+      const firstUser =
+        session.messages.find((m) => m.role === "user") ??
+        messages.find((m) => m.role === "user");
+      if (firstUser) set.title = titleFromUserMessage(firstUser.content);
+    }
     await sessions().updateOne(
       { _id: sessionId },
-      { $push: { messages: { $each: messages } } },
+      { $push: { messages: { $each: messages } }, $set: set },
     );
   };
   const summaryCache: SummaryCache = {
@@ -208,6 +217,13 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
     if (!session) {
       return reply.code(404).send({ error: "unknown session" });
     }
-    return { sessionId: session._id, user_ref: session.user_ref, messages: session.messages };
+    return {
+      sessionId: session._id,
+      user_ref: session.user_ref,
+      display_name: session.display_name,
+      title: session.title ?? "",
+      updated_at: session.updated_at ?? session.created_at,
+      messages: session.messages,
+    };
   });
 }

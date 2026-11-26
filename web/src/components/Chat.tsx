@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Markdown } from "./Markdown.tsx";
+import { loadSession, type User } from "../lib/api.ts";
 import {
   appendAssistantNote,
   appendAssistantPlaceholder,
@@ -16,16 +18,6 @@ import {
   type PendingConfirmation,
 } from "../lib/chatStream.ts";
 
-const SESSION_KEY = "flight-agent.session";
-
-const FALLBACK_USERS = [
-  { user_ref: "ava", display_name: "Ava" },
-  { user_ref: "ben", display_name: "Ben" },
-  { user_ref: "chloe", display_name: "Chloe" },
-  { user_ref: "dan", display_name: "Dan" },
-  { user_ref: "elena", display_name: "Elena" },
-];
-
 type ChatState =
   | { stage: "idle" }
   | { stage: "streaming" }
@@ -33,74 +25,50 @@ type ChatState =
   | { stage: "confirming"; pending: PendingConfirmation }
   | { stage: "failed"; error: string };
 
-export default function Chat() {
-  const [users, setUsers] = useState(FALLBACK_USERS);
-  const [userRef, setUserRef] = useState("ava");
-  const [pin, setPin] = useState("4321");
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [displayName, setDisplayName] = useState<string | null>(null);
+type HistoryState = "loading" | "ready" | "error";
+
+export default function Chat({
+  sessionId,
+  user,
+  onLogout,
+}: {
+  sessionId: string;
+  user: User;
+  onLogout: () => void;
+}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [history, setHistory] = useState<HistoryState>("loading");
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [chat, setChat] = useState<ChatState>({ stage: "idle" });
 
   const busy = chat.stage === "streaming" || chat.stage === "confirming";
-  const canCompose =
-    chat.stage === "idle" || chat.stage === "failed";
+  const canCompose = chat.stage === "idle" || chat.stage === "failed";
 
   useEffect(() => {
-    fetch("/api/users")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((body) => {
-        if (body?.users?.length) setUsers(body.users);
-      })
-      .catch(() => {});
-    const saved = localStorage.getItem(SESSION_KEY);
-    if (!saved) return;
-    fetch(`/api/sessions/${saved}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("gone"))))
-      .then((body) => {
-        setSessionId(body.sessionId);
-        setUserRef(body.user_ref);
-        setDisplayName(body.user_ref);
-        setMessages(fromStoredMessages(body.messages));
-      })
-      .catch(() => localStorage.removeItem(SESSION_KEY));
-  }, []);
-
-  async function login(e: React.FormEvent) {
-    e.preventDefault();
-    setChat({ stage: "idle" });
-    const res = await fetch("/api/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ user_ref: userRef, pin }),
-    });
-    if (!res.ok) {
-      setChat({ stage: "failed", error: "Invalid user or PIN" });
-      return;
-    }
-    const body = await res.json();
-    localStorage.setItem(SESSION_KEY, body.sessionId);
-    setSessionId(body.sessionId);
-    setDisplayName(body.display_name);
-    const history = await fetch(`/api/sessions/${body.sessionId}`);
-    if (history.ok) {
-      const hist = await history.json();
-      setMessages(fromStoredMessages(hist.messages));
-    }
-  }
-
-  function logout() {
-    localStorage.removeItem(SESSION_KEY);
-    setSessionId(null);
-    setDisplayName(null);
+    let cancelled = false;
+    setHistory("loading");
     setMessages([]);
     setChat({ stage: "idle" });
-  }
+    loadSession(sessionId)
+      .then((body) => {
+        if (cancelled) return;
+        setMessages(fromStoredMessages(body.messages));
+        setHistory("ready");
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setHistoryError((err as Error).message);
+        setHistory("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
-    if (!sessionId || !input.trim() || !canCompose) return;
+    if (!input.trim() || !canCompose || history !== "ready") return;
     const text = input.trim();
     setInput("");
     setChat({ stage: "streaming" });
@@ -118,7 +86,9 @@ export default function Chat() {
             setChat({ stage: "awaiting_confirmation", pending: event.pending });
             break;
           case "done":
-            setMessages((m) => finalizeLastAssistant(m, event.reply, event.toolTrace));
+            setMessages((m) =>
+              finalizeLastAssistant(m, event.reply, event.toolTrace),
+            );
             setChat((c) =>
               c.stage === "awaiting_confirmation"
                 ? c
@@ -141,7 +111,7 @@ export default function Chat() {
   }
 
   async function decide(confirm: boolean) {
-    if (chat.stage !== "awaiting_confirmation" || !sessionId) return;
+    if (chat.stage !== "awaiting_confirmation") return;
     const pending = chat.pending;
     if (!confirm) {
       setChat({ stage: "idle" });
@@ -170,48 +140,33 @@ export default function Chat() {
       );
       setChat({ stage: "idle" });
     } catch (err) {
-      setMessages((m) => appendAssistantNote(m, `Confirmation failed: ${(err as Error).message}`));
+      setMessages((m) =>
+        appendAssistantNote(m, `Confirmation failed: ${(err as Error).message}`),
+      );
       setChat({ stage: "failed", error: (err as Error).message });
     }
-  }
-
-  if (!sessionId) {
-    return (
-      <form className="login" onSubmit={login}>
-        <h1>Flight Booking Agent</h1>
-        <p className="muted">Mock login — demo PIN is 4321 for every user.</p>
-        <select value={userRef} onChange={(e) => setUserRef(e.target.value)}>
-          {users.map((u) => (
-            <option key={u.user_ref} value={u.user_ref}>
-              {u.display_name} ({u.user_ref})
-            </option>
-          ))}
-        </select>
-        <input
-          value={pin}
-          onChange={(e) => setPin(e.target.value)}
-          placeholder="PIN"
-          inputMode="numeric"
-        />
-        <button type="submit">Log in</button>
-        {chat.stage === "failed" && <p className="error">{chat.error}</p>}
-      </form>
-    );
   }
 
   return (
     <div className="chat">
       <header>
-        <h1>Flight Booking Agent</h1>
+        <Link className="back" href="/">
+          ← Conversations
+        </Link>
         <span className="muted">
-          logged in as {displayName} ({userRef})
+          {user.display_name} ({user.user_ref})
         </span>
-        <button className="logout" onClick={logout}>
+        <button className="logout" onClick={onLogout}>
           Log out
         </button>
       </header>
+
       <div className="messages">
-        {messages.length === 0 && (
+        {history === "loading" && <p className="muted">Loading conversation…</p>}
+        {history === "error" && (
+          <p className="error">Could not load this conversation: {historyError}</p>
+        )}
+        {history === "ready" && messages.length === 0 && (
           <p className="muted">
             Try: &ldquo;flights from London to Lisbon tomorrow&rdquo; or &ldquo;what are my
             bookings?&rdquo;
@@ -255,6 +210,7 @@ export default function Chat() {
           </div>
         )}
       </div>
+
       {chat.stage === "failed" && <p className="error">{chat.error}</p>}
       <form className="composer" onSubmit={send}>
         <input
@@ -265,9 +221,12 @@ export default function Chat() {
               ? "Resolve the confirmation above first…"
               : "Ask about flights or your bookings…"
           }
-          disabled={!canCompose}
+          disabled={!canCompose || history !== "ready"}
         />
-        <button type="submit" disabled={!canCompose || !input.trim()}>
+        <button
+          type="submit"
+          disabled={!canCompose || history !== "ready" || !input.trim()}
+        >
           Send
         </button>
       </form>
