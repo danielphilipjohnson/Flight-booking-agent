@@ -9,7 +9,6 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Schema auto-applies on first boot of an empty volume.
       - ./server/src/db/schema.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -29,15 +28,6 @@ services:
       timeout: 3s
       retries: 10
 
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama:/root/.ollama
-    # CPU-only by default; add deploy.resources reservations for GPU hosts.
-
 volumes:
   pgdata:
   mongodata:
-  ollama:

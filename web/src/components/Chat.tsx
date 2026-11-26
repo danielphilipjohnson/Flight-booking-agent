@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Markdown } from "./Markdown.tsx";
 import {
   appendAssistantNote,
   appendAssistantPlaceholder,
@@ -219,7 +220,7 @@ export default function Chat() {
         {messages.map((m) => (
           <div key={m.id} className={`msg ${m.role}`}>
             <div className="bubble">
-              {m.content}
+              {m.role === "assistant" ? <Markdown>{m.content}</Markdown> : m.content}
               {m.role === "assistant" &&
                 chat.stage === "streaming" &&
                 m.id === messages[messages.length - 1]!.id && (

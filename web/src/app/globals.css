@@ -60,12 +60,13 @@ main {
   padding: 0.6rem 0.9rem;
   border-radius: 1rem;
   text-align: left;
-  white-space: pre-wrap;
 }
 
 .msg.user .bubble {
   background: #2563eb;
   color: #fff;
+  /* user input is plain text: preserve their line breaks */
+  white-space: pre-wrap;
 }
 
 .msg.assistant .bubble {
@@ -170,4 +171,116 @@ button:disabled {
   50% {
     opacity: 0;
   }
+}
+
+/* Markdown rendered inside assistant bubbles (react-markdown + remark-gfm) */
+.markdown {
+  overflow-x: auto;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown p {
+  margin: 0.5rem 0;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 0.8rem 0 0.4rem;
+  line-height: 1.25;
+}
+
+.markdown h1 {
+  font-size: 1.25rem;
+}
+.markdown h2 {
+  font-size: 1.15rem;
+}
+.markdown h3 {
+  font-size: 1.05rem;
+}
+
+.markdown ul,
+.markdown ol {
+  margin: 0.5rem 0;
+  padding-left: 1.4rem;
+}
+
+.markdown li {
+  margin: 0.2rem 0;
+}
+
+.markdown table {
+  border-collapse: collapse;
+  margin: 0.6rem 0;
+  font-size: 0.9rem;
+  width: 100%;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid #374151;
+  padding: 0.35rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown th {
+  background: #111827;
+  font-weight: 600;
+}
+
+.markdown tr:nth-child(even) td {
+  background: #1b2430;
+}
+
+.markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+  background: #111827;
+  border: 1px solid #374151;
+  border-radius: 0.3rem;
+  padding: 0.05rem 0.3rem;
+  overflow-wrap: anywhere;
+}
+
+.markdown pre {
+  margin: 0.6rem 0;
+  padding: 0.6rem 0.8rem;
+  background: #111827;
+  border: 1px solid #374151;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+}
+
+.markdown pre code {
+  border: none;
+  padding: 0;
+  background: none;
+  font-size: 0.85rem;
+}
+
+.markdown blockquote {
+  margin: 0.6rem 0;
+  padding-left: 0.8rem;
+  border-left: 3px solid #374151;
+  color: #cbd5e1;
+}
+
+.markdown hr {
+  border: none;
+  border-top: 1px solid #374151;
+  margin: 0.8rem 0;
+}
+
+.markdown a {
+  color: #93c5fd;
 }

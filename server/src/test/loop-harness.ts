@@ -71,6 +71,27 @@ ok(
 );
 ok(assembled.evalCount === 42, "eval_count captured from the done chunk");
 
+console.log("\n# assembleChat: native Ollama shape (object arguments, nested function.index)");
+const native = assembleChat([
+  {
+    message: {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        { id: "c1", type: "function", function: { index: 0, name: "search_flights", arguments: { origin: "LHR", destination: "LIS", date: "2026-11-21" } } },
+        { id: "c2", type: "function", function: { index: 1, name: "list_available_seats", arguments: { flight_id: "FF1" } } },
+      ],
+    },
+  },
+  { done: true },
+]);
+ok(native.message.tool_calls.length === 2, "parallel calls stay separate via nested function.index");
+ok(
+  native.message.tool_calls[0]!.function.arguments.destination === "LIS",
+  "object arguments used as-is (no '[object Object]' JSON.parse crash)",
+);
+ok(native.message.tool_calls[1]!.function.name === "list_available_seats", "second parallel call preserved");
+
 console.log("\n# read-tool turn end to end (real tools on sqlite)");
 const persisted: StoredMessage[] = [];
 const client1 = fakeClient([

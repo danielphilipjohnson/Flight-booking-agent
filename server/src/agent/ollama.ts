@@ -25,7 +25,14 @@ export interface RawToolCallFragment {
   index?: number;
   id?: string;
   type?: string;
-  function?: { name?: string; arguments?: string };
+  function?: {
+    // Ollama nests the parallel-call index inside `function`.
+    index?: number;
+    name?: string;
+    // Ollama sends a ready-made object; OpenAI-compatible streams send JSON
+    // string fragments that must be concatenated before parsing.
+    arguments?: string | Record<string, unknown>;
+  };
 }
 
 export interface ChatChunk {
@@ -75,8 +82,13 @@ export function createOllamaClient(baseUrl: string): OllamaClient {
         }),
         ...(opts.signal ? { signal: opts.signal } : {}),
       });
-      if (!res.ok || !res.body) {
-        throw new Error(`Ollama /api/chat failed: HTTP ${res.status}`);
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        const suffix = detail.trim() ? ` — ${detail.trim().slice(0, 300)}` : "";
+        throw new Error(`Ollama /api/chat failed: HTTP ${res.status}${suffix}`);
+      }
+      if (!res.body) {
+        throw new Error("Ollama /api/chat failed: empty response body");
       }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -109,7 +121,12 @@ export function assembleChat(chunks: Iterable<ChatChunk>): ChatResult {
   let promptEvalCount = 0;
   const calls = new Map<
     number,
-    { id: string; name: string; argsJson: string }
+    {
+      id: string;
+      name: string;
+      argsJson: string;
+      argsObject: Record<string, unknown> | null;
+    }
   >();
   for (const chunk of chunks) {
     if (chunk.error) throw new Error(`Ollama error: ${chunk.error}`);
@@ -117,15 +134,17 @@ export function assembleChat(chunks: Iterable<ChatChunk>): ChatResult {
     if (message?.role) role = message.role;
     if (message?.content) content += message.content;
     for (const fragment of message?.tool_calls ?? []) {
-      const index = fragment.index ?? 0;
+      const index = fragment.index ?? fragment.function?.index ?? 0;
       let entry = calls.get(index);
       if (!entry) {
-        entry = { id: "", name: "", argsJson: "" };
+        entry = { id: "", name: "", argsJson: "", argsObject: null };
         calls.set(index, entry);
       }
       if (fragment.id) entry.id = fragment.id;
       if (fragment.function?.name) entry.name = fragment.function.name;
-      if (fragment.function?.arguments) entry.argsJson += fragment.function.arguments;
+      const rawArgs = fragment.function?.arguments;
+      if (typeof rawArgs === "string") entry.argsJson += rawArgs;
+      else if (rawArgs && typeof rawArgs === "object") entry.argsObject = rawArgs;
     }
     if (chunk.eval_count !== undefined) evalCount = chunk.eval_count;
     if (chunk.prompt_eval_count !== undefined) {
@@ -136,7 +155,9 @@ export function assembleChat(chunks: Iterable<ChatChunk>): ChatResult {
     .sort(([a], [b]) => a - b)
     .map(([index, entry], position) => {
       let args: Record<string, unknown> = {};
-      if (entry.argsJson.trim()) {
+      if (entry.argsObject) {
+        args = entry.argsObject;
+      } else if (entry.argsJson.trim()) {
         args = JSON.parse(entry.argsJson) as Record<string, unknown>;
       }
       return {
