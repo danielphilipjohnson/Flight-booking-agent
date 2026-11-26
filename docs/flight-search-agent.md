@@ -196,6 +196,20 @@ alternatives the agent can reveal on request.
 | No results | Nearby dates + reachable destinations suggested |
 | Model loops or hallucinates a tool | 8-round cap; unknown tools and invalid arguments return error text the model must recover from |
 
+## Fuzzing
+
+| Command | Needs | What it does |
+| --- | --- | --- |
+| `npm run fuzz` | nothing | Deterministic offline fuzzer (seed 42, 3000 cases) over the pure layers: tool schemas, `filter_offers` against random pins, ranking invariants, resolver contract, date math, message normalization |
+| `npm run fuzz:live` | Postgres + seeded data | Generates randomized *valid* tool arguments (cities, fuzzy dates, passengers, cabins, budgets), runs the real SQL tools, and asserts result invariants: shortlist membership, price/duration minima, `price_total == per-person x passengers`, seats >= passengers, price-sorted browse results, per-day windows, no-results carry suggestions. Roughly every other successful search is followed by a randomized `filter_offers` chain. |
+| `npm run fuzz:agent` | full stack + Ollama | Runs the real agent loop (`qwen3`) against randomized user openings from the phase notes, plus scripted multi-turn flows ("actually the second one", "book the cheapest one"). Asserts the loop completes within the round cap, replies are non-empty, only known tools are invoked, and every turn lands in Mongo history. Prints transcripts per session. |
+
+All three are seeded (`FUZZ_SEED`, default 42) so failures reproduce. Scale
+with `FUZZ_ITERATIONS` (live) and pick the persona with `FUZZ_USER` /
+`FUZZ_PIN` (agent). Run order: `docker compose up -d`, `npm run seed`, then
+`npm run fuzz:live` / `npm run fuzz:agent`. Re-seed first if the seed day has
+drifted, otherwise most date-window searches will correctly return empty.
+
 ## Current limits
 
 - One-way searches only; round-trip return dates are a follow-up

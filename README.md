@@ -63,6 +63,8 @@ cp .env.example .env
 npm install
 npm run seed:check   # preview the dataset, no DB write
 npm run seed         # flights + mock users (schema auto-applies on first compose boot)
+npm run fuzz:live    # optional: fuzzer against live Postgres (after seed)
+npm run fuzz:agent   # optional: fuzzer through Ollama + full stack
 npm run dev:server   # Fastify agent API on :3001
 npm run dev:web      # Next chat UI on :3000
 ```
