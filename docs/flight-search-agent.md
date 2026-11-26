@@ -5,7 +5,10 @@ are designed to flow. The design follows the phase notes for the search stage:
 intent capture first, ranked shortlists, and conversational refinement instead
 of filter sidebars.
 
-For architecture and setup, see the [README](../README.md).
+For architecture and setup, see the [README](../README.md). For the wider
+funnel-top roadmap — round trips, fare details, comparison, price tracking —
+and the full chat-scenario catalog, see
+[scoping/shopping-search-scenarios.md](scoping/shopping-search-scenarios.md).
 
 ## What it is
 
