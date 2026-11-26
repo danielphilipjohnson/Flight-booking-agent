@@ -4,11 +4,33 @@ export interface ToolChip {
   summary: string;
 }
 
+export type DeliveryStatus = "sent" | "delivered";
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** ISO timestamp; stored messages already carry one. */
+  ts?: string;
+  /** Outgoing-message receipt: one tick when sent, two when delivered. */
+  status?: DeliveryStatus;
   toolTrace?: ToolChip[];
+}
+
+export function formatMessageTime(ts?: string): string {
+  if (!ts) return "";
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+export function formatMessageTimestamp(ts?: string): string {
+  if (!ts) return "";
+  const date = new Date(ts);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
 }
 
 export interface PendingConfirmation {
@@ -148,14 +170,40 @@ export async function streamChatTurn(
 }
 
 export function appendUserTurn(messages: ChatMessage[], text: string): ChatMessage[] {
-  return [...messages, { id: crypto.randomUUID(), role: "user", content: text }];
+  return [
+    ...messages,
+    {
+      id: crypto.randomUUID(),
+      role: "user",
+      content: text,
+      ts: new Date().toISOString(),
+      status: "sent",
+    },
+  ];
 }
 
 export function appendAssistantPlaceholder(messages: ChatMessage[]): ChatMessage[] {
   return [
     ...messages,
-    { id: crypto.randomUUID(), role: "assistant", content: "", toolTrace: [] },
+    {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: "",
+      ts: new Date().toISOString(),
+      toolTrace: [],
+    },
   ];
+}
+
+/** Mark the most recent outgoing message with both ticks once the server has it. */
+export function markLastUserDelivered(messages: ChatMessage[]): ChatMessage[] {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]!.role !== "user") continue;
+    return messages.map((m, index) =>
+      index === i ? { ...m, status: "delivered" as const } : m,
+    );
+  }
+  return messages;
 }
 
 export function appendTokenToLastAssistant(
@@ -183,8 +231,12 @@ export function finalizeLastAssistant(
   toolTrace: ToolChip[],
 ): ChatMessage[] {
   if (messages.length === 0) return messages;
+  // Never leave an empty bubble: a model can finish with no usable content.
+  const content = reply.trim()
+    ? reply
+    : "The model returned an empty response — please try again.";
   return messages.map((m, i) =>
-    i === messages.length - 1 ? { ...m, content: reply, toolTrace } : m,
+    i === messages.length - 1 ? { ...m, content, toolTrace } : m,
   );
 }
 
@@ -201,7 +253,16 @@ export function appendAssistantNote(
   content: string,
   toolTrace?: ToolChip[],
 ): ChatMessage[] {
-  return [...messages, { id: crypto.randomUUID(), role: "assistant", content, toolTrace }];
+  return [
+    ...messages,
+    {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content,
+      ts: new Date().toISOString(),
+      ...(toolTrace ? { toolTrace } : {}),
+    },
+  ];
 }
 
 export interface StoredMessage {
@@ -217,7 +278,15 @@ export function fromStoredMessages(stored: StoredMessage[]): ChatMessage[] {
   const out: ChatMessage[] = [];
   for (const m of stored) {
     if (m.role === "user" || m.role === "assistant") {
-      out.push({ id: crypto.randomUUID(), role: m.role, content: m.content, toolTrace: [] });
+      const ts = typeof m.ts === "string" ? m.ts : m.ts?.toISOString();
+      out.push({
+        id: crypto.randomUUID(),
+        role: m.role,
+        content: m.content,
+        ...(ts ? { ts } : {}),
+        ...(m.role === "user" ? { status: "delivered" as const } : {}),
+        toolTrace: [],
+      });
     } else if (m.role === "tool") {
       const last = out[out.length - 1];
       if (last && last.role === "assistant") {

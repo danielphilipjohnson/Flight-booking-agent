@@ -8,7 +8,9 @@ import {
   appendUserTurn,
   createSseParser,
   finalizeLastAssistant,
+  formatMessageTime,
   fromStoredMessages,
+  markLastUserDelivered,
   removeEmptyTrailingAssistant,
   streamChatTurn,
   type ChatMessage,
@@ -90,6 +92,9 @@ test("message updaters are named pure functions with explicit behavior", () => {
   assert.equal(messages[0]!.role, "user");
   assert.equal(messages[1]!.role, "assistant");
   assert.notEqual(messages[0]!.id, messages[1]!.id);
+  assert.ok(messages[0]!.ts);
+  assert.ok(messages[1]!.ts);
+  assert.equal(messages[0]!.status, "sent");
 
   messages = appendTokenToLastAssistant(messages, "Hel");
   messages = appendTokenToLastAssistant(messages, "lo");
@@ -98,9 +103,15 @@ test("message updaters are named pure functions with explicit behavior", () => {
   messages = appendToolChip(messages, { name: "search_flights", status: "ok", summary: "3 results" });
   assert.equal(messages[1]!.toolTrace!.length, 1);
 
+  messages = markLastUserDelivered(messages);
+  assert.equal(messages[0]!.status, "delivered");
+  assert.equal(messages[1]!.status, undefined);
+
+  const assistantTs = messages[1]!.ts;
   messages = finalizeLastAssistant(messages, "final reply", []);
   assert.equal(messages[1]!.content, "final reply");
   assert.equal(messages[1]!.toolTrace!.length, 0);
+  assert.equal(messages[1]!.ts, assistantTs);
 
   messages = appendAssistantNote(messages, "Declined — no changes were made.");
   assert.equal(messages[2]!.content, "Declined — no changes were made.");
@@ -123,7 +134,10 @@ test("fromStoredMessages maps Mongo history into UI messages, tool rows become c
   const messages = fromStoredMessages(stored);
   assert.equal(messages.length, 2);
   assert.equal(messages[0]!.role, "user");
+  assert.equal(messages[0]!.ts, "2026-11-21T10:00:00Z");
+  assert.equal(messages[0]!.status, "delivered");
   assert.equal(messages[1]!.content, "3 flights found.");
+  assert.equal(messages[1]!.ts, "2026-11-21T10:00:03Z");
   assert.deepEqual(
     messages[1]!.toolTrace!.map((t) => [t.name, t.status]),
     [
@@ -134,10 +148,31 @@ test("fromStoredMessages maps Mongo history into UI messages, tool rows become c
   assert.equal(fromStoredMessages([{ role: "system", content: "sys" }]).length, 0);
 });
 
+test("timestamps format for display without breaking on missing values", () => {
+  assert.match(formatMessageTime("2026-11-21T10:00:00Z"), /\d{1,2}:\d{2}/);
+  assert.equal(formatMessageTime(undefined), "");
+  assert.equal(formatMessageTime("not-a-date"), "");
+});
+
+test("markLastUserDelivered only touches the newest outgoing message", () => {
+  const messages: ChatMessage[] = [
+    { id: "a", role: "user", content: "first", status: "delivered" },
+    { id: "b", role: "assistant", content: "reply" },
+    { id: "c", role: "user", content: "second", status: "sent" },
+    { id: "d", role: "assistant", content: "" },
+  ];
+  const updated = markLastUserDelivered(messages);
+  assert.equal(updated[0]!.status, "delivered");
+  assert.equal(updated[2]!.status, "delivered");
+  assert.equal(messages[2]!.status, "sent", "input is not mutated");
+});
+
 test("updaters are safe on edge cases", () => {
   assert.deepEqual(appendTokenToLastAssistant([], "x"), []);
   assert.deepEqual(appendToolChip([], { name: "t", status: "ok", summary: "" }), []);
   assert.deepEqual(finalizeLastAssistant([], "r", []), []);
+  const emptyReply = finalizeLastAssistant(appendAssistantPlaceholder([]), "   ", []);
+  assert.match(emptyReply[0]!.content, /empty response/);
   const withPlaceholder = appendAssistantPlaceholder([]);
   assert.equal(removeEmptyTrailingAssistant(withPlaceholder).length, 0);
   const withText = appendUserTurn([], "hi");

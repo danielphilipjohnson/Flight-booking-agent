@@ -143,11 +143,15 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 | `POST /api/chat/stream` | SSE twin of `/api/chat`: `typing` / `token` / `tool` / `confirm` / `done` / `error` events; client disconnect aborts the Ollama call |
 | `POST /api/tools/:name/confirm` | `{sessionId, args}` → executes a confirm-gated write tool in a transaction, persists the trace to Mongo |
 
+Agent errors and warnings are appended as JSON lines to `logs/agent-errors.log`
+(override with `ERROR_LOG_FILE`) and also written to the server console.
+
 ## Tool contract (Phase 2 — read tools)
 
 | Tool | Args | Returns |
 | --- | --- | --- |
 | `search_flights` | `origin`, `destination` (IATA or city), `date` (ISO) | `{ results: [{ flight_id, flight_no, departs_at }] }` — IDs only, by design |
+| `find_first_available_flight` | `month?` (`YYYY-MM`) or `from_date`/`to_date`, `origin?`/`destination?` (omit both for every route), `class?` | First flight in the range with an available seat, plus times, base price, seat count, min price, and sample seats |
 | `get_flight_details` | `flight_id` | times, base price, `seat_summary` per class/status |
 | `list_available_seats` | `flight_id`, `class?` | `{ available_seats: [{ seat_no, class, price }] }` |
 | `list_my_bookings` | — (session identity injected) | `{ bookings: [...] }`, cancelled excluded by SQL |

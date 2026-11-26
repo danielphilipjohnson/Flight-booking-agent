@@ -68,6 +68,8 @@ export async function driveLoop(opts: {
   context?: ContextOptions;
   signal?: AbortSignal;
   onEvent?: (event: LoopEvent) => void | Promise<void>;
+  /** Non-fatal diagnostics (e.g. a retry after an empty model response). */
+  onWarning?: (message: string) => void;
   persist?: (messages: StoredMessage[]) => Promise<void>;
   makeProposalId?: () => string;
 }): Promise<LoopResult> {
@@ -83,6 +85,7 @@ export async function driveLoop(opts: {
     context,
     signal,
     onEvent,
+    onWarning,
     persist,
     makeProposalId,
   } = opts;
@@ -121,6 +124,7 @@ export async function driveLoop(opts: {
   let evalCount = 0;
   let promptEvalCount = 0;
   let iterations = 0;
+  let emptyRetries = 0;
 
   for (let i = 0; i < maxIterations; i++) {
     iterations = i + 1;
@@ -137,11 +141,42 @@ export async function driveLoop(opts: {
         await onEvent?.({ type: "token", text: chunk.message.content });
       }
     }
-    const { message, evalCount: evals, promptEvalCount: promptEvals } = assembleChat(chunks);
+    const {
+      message,
+      evalCount: evals,
+      promptEvalCount: promptEvals,
+      thinking,
+      doneReason,
+    } = assembleChat(chunks);
     if (evals) evalCount = evals;
     if (promptEvals) promptEvalCount = promptEvals;
 
     if (message.tool_calls.length === 0) {
+      // A completion with neither content nor tool calls is not an answer.
+      // Thinking models can do this by finishing with only `thinking` tokens.
+      const diagnostics = [
+        "model returned an empty response",
+        `model=${model}`,
+        `attempt=${emptyRetries + 1}`,
+        `iteration=${iterations}`,
+        `done_reason=${doneReason ?? "unknown"}`,
+        `thinking_chars=${thinking.length}`,
+        `eval_count=${evalCount}`,
+        `prompt_eval_count=${promptEvalCount}`,
+      ].join(" ");
+      if (message.content.trim() === "") {
+        if (emptyRetries < 1 && i < maxIterations - 1) {
+          emptyRetries += 1;
+          onWarning?.(`${diagnostics} — retrying once with a nudge`);
+          messages.push({
+            role: "user",
+            content:
+              "Your previous response was empty. Please answer the user's last request in plain text, or call a tool if you need data.",
+          });
+          continue;
+        }
+        throw new Error(diagnostics);
+      }
       const reply = message.content;
       if (persist) {
         await persist([{ role: "assistant", content: reply, ts: now() }]);

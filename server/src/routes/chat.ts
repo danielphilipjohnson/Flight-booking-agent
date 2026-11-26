@@ -11,6 +11,7 @@ import { titleFromUserMessage } from "../db/conversations.ts";
 import { routeBriefLoader } from "../db/routes.ts";
 import { createToolRegistry } from "../tools/registry.ts";
 import { formatSse } from "./sse.ts";
+import { appendError, appendWarning } from "../logging.ts";
 import type { SummaryCache } from "../agent/context.ts";
 import type { PendingProposal } from "../tools/proposal.ts";
 
@@ -132,8 +133,12 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       }
     };
 
+    const onWarning = (message: string) => {
+      req.log.warn({ sessionId, model: config.ollamaModel }, message);
+      appendWarning(message, { sessionId, model: config.ollamaModel, route: "/api/chat/stream" });
+    };
     try {
-      await driveLoop({
+      const result = await driveLoop({
         client: createOllamaClient(config.ollamaUrl),
         model: config.ollamaModel,
         systemPrompt,
@@ -149,11 +154,29 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         },
         signal: abort.signal,
         onEvent,
+        onWarning,
         persist,
         makeProposalId: () => randomUUID(),
       });
+      req.log.info(
+        {
+          sessionId,
+          model: config.ollamaModel,
+          iterations: result.iterations,
+          replyChars: result.reply.length,
+          toolCalls: result.toolTrace.length,
+          evalCount: result.evalCount,
+          promptEvalCount: result.promptEvalCount,
+          latencyMs: Date.now() - started,
+        },
+        "chat turn complete",
+      );
     } catch (err) {
-      req.log.error(err);
+      req.log.error(
+        { err, sessionId, model: config.ollamaModel, stage: "agent" },
+        "chat turn failed",
+      );
+      appendError("chat turn failed", { sessionId, model: config.ollamaModel, stage: "agent", route: "/api/chat/stream" }, err);
       if (!abort.signal.aborted) {
         send("error", { error: `agent backend failed: ${(err as Error).message}` });
       }
@@ -184,6 +207,10 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
           compactThreshold: config.compactThreshold,
           summaryCache: ctx.summaryCache,
         },
+        onWarning: (message) => {
+          req.log.warn({ sessionId, model: config.ollamaModel }, message);
+          appendWarning(message, { sessionId, model: config.ollamaModel, route: "/api/chat" });
+        },
         persist,
         makeProposalId: () => randomUUID(),
       });
@@ -206,7 +233,11 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         stats,
       };
     } catch (err) {
-      req.log.error(err);
+      req.log.error(
+        { err, sessionId, model: config.ollamaModel, stage: "agent" },
+        "chat turn failed",
+      );
+      appendError("chat turn failed", { sessionId, model: config.ollamaModel, stage: "agent", route: "/api/chat" }, err);
       return reply.code(502).send({ error: `agent backend failed: ${(err as Error).message}` });
     }
   });

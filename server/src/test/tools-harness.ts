@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { FIXED_NOW, loadSchemaSql, seededQueryable, sqliteDb, toQueryable } from "./fixtures.ts";
 import { generateDataset, uuidFor } from "../seed/generate.ts";
 import { createFlightTools, releaseExpiredHolds } from "../tools/flights.ts";
-import { searchFlightsInput, type ToolDef } from "../tools/schemas.ts";
+import {
+  findFirstAvailableFlightInput,
+  searchFlightsInput,
+  type ToolDef,
+} from "../tools/schemas.ts";
 
 let passed = 0;
 function ok(condition: boolean, label: string): void {
@@ -30,6 +34,51 @@ ok(citySearch.results.length === 3 && citySearch.results.every((r) => r.flight_n
 const noRoute = (await byName("search_flights").run({ origin: "LHR", destination: "Tokyo", date: tomorrow } as never, ctx)) as typeof search;
 ok(noRoute.results.length === 0, "unknown destination -> graceful empty results");
 ok(!searchFlightsInput.safeParse({ origin: "LHR", destination: "LIS", date: "tomorrow" }).success, "Zod rejects non-ISO dates");
+
+console.log("\n# find_first_available_flight");
+const first = (await byName("find_first_available_flight").run(
+  { origin: "LHR", destination: "LIS", month: "2026-11" } as never,
+  ctx,
+)) as {
+  results: {
+    flight_id: string;
+    flight_no: string;
+    departs_at: string;
+    available_seat_count: number;
+    example_seats: { seat_no: string }[];
+  }[];
+  searched: { from: string; to: string };
+};
+ok(first.results.length === 1, "month range returns exactly one first available flight");
+ok(first.results[0]!.flight_no === "FF101", "first available flight is the earliest departure in the month");
+ok(first.results[0]!.departs_at.startsWith("2026-11-20"), "first flight is on the first seeded day of the month");
+ok(first.results[0]!.available_seat_count > 0 && first.results[0]!.example_seats.length > 0, "result includes seat availability and examples");
+ok(first.searched.from === "2026-11-01" && first.searched.to === "2026-11-30", "month expands to inclusive UTC bounds");
+const firstAnyRoute = (await byName("find_first_available_flight").run(
+  { month: "2026-11" } as never,
+  ctx,
+)) as typeof first;
+ok(firstAnyRoute.results.length === 1, "omitting origin/destination searches every route");
+ok(
+  firstAnyRoute.results[0]!.departs_at <= first.results[0]!.departs_at,
+  "all-route search returns a flight at least as early as the single-route search",
+);
+const incomplete = (await byName("find_first_available_flight").run(
+  { origin: "LHR", month: "2026-11" } as never,
+  ctx,
+)) as { error?: string };
+ok(typeof incomplete.error === "string", "half-specified route is an error, not a silent guess");
+const firstBusiness = (await byName("find_first_available_flight").run(
+  { origin: "LHR", destination: "LIS", month: "2026-11", class: "business" } as never,
+  ctx,
+)) as typeof first;
+ok(firstBusiness.results[0]?.flight_no === "FF101", "business filter finds the first flight with a business seat");
+const noFirst = (await byName("find_first_available_flight").run(
+  { origin: "LHR", destination: "Tokyo", month: "2026-11" } as never,
+  ctx,
+)) as typeof first;
+ok(noFirst.results.length === 0, "unknown route returns graceful empty results");
+ok(!findFirstAvailableFlightInput.safeParse({ origin: "LHR", destination: "LIS", month: "2026-11-21" }).success, "Zod rejects a date instead of a month");
 
 console.log("\n# get_flight_details");
 const flightId = search.results[0]!.flight_id;

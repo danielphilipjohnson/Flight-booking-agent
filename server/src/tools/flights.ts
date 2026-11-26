@@ -1,5 +1,6 @@
 import type { Queryable } from "../db/types.ts";
 import {
+  findFirstAvailableFlightInput,
   getFlightDetailsInput,
   listAvailableSeatsInput,
   listMyBookingsInput,
@@ -62,11 +63,45 @@ function utcDay(value: unknown): string {
   return iso(value).slice(0, 10);
 }
 
+function monthBounds(month: string | undefined, now: Date): { from: string; to: string } {
+  const year = month ? Number(month.slice(0, 4)) : now.getUTCFullYear();
+  const monthIndex = month ? Number(month.slice(5, 7)) - 1 : now.getUTCMonth();
+  const from = new Date(Date.UTC(year, monthIndex, 1)).toISOString().slice(0, 10);
+  const to = new Date(Date.UTC(year, monthIndex + 1, 0)).toISOString().slice(0, 10);
+  return { from, to };
+}
+
+async function allFlights(db: Queryable): Promise<Record<string, unknown>[]> {
+  return (
+    await db.query(
+      "SELECT id, flight_no, origin, destination, departs_at, arrives_at, base_price FROM flight",
+    )
+  ).rows;
+}
+
+async function flightsBetween(
+  db: Queryable,
+  originCodes: string[],
+  destinationCodes: string[],
+): Promise<Record<string, unknown>[]> {
+  const originPh = originCodes.map((_, i) => `$${i + 1}`).join(", ");
+  const destPh = destinationCodes
+    .map((_, i) => `$${originCodes.length + i + 1}`)
+    .join(", ");
+  return (
+    await db.query(
+      `SELECT id, flight_no, origin, destination, departs_at, arrives_at, base_price
+       FROM flight WHERE origin IN (${originPh}) AND destination IN (${destPh})`,
+      [...originCodes, ...destinationCodes],
+    )
+  ).rows;
+}
+
 export function createFlightTools(db: Queryable): ToolDef[] {
   const searchFlights: ToolDef = {
     name: "search_flights",
     description:
-      "Search flights by origin and destination (IATA code or city name) on a single ISO date. Returns flight IDs only; call get_flight_details for times and prices.",
+      "Search flights by origin and destination (IATA code or city name) on a single ISO date. Returns flight IDs only; call get_flight_details for times and prices. For a month or open-ended range, use find_first_available_flight instead.",
     schema: searchFlightsInput,
     run: async (args, _ctx) => {
       const { origin, destination, date } = searchFlightsInput.parse(args) as {
@@ -80,14 +115,9 @@ export function createFlightTools(db: Queryable): ToolDef[] {
       if (originCodes.length === 0 || destinationCodes.length === 0) {
         return { results: [] };
       }
-      const originPh = originCodes.map((_, i) => `$${i + 1}`).join(", ");
-      const destPh = destinationCodes.map((_, i) => `$${originCodes.length + i + 1}`).join(", ");
-      const rows = (
-        await db.query(
-          `SELECT id, flight_no, departs_at FROM flight WHERE origin IN (${originPh}) AND destination IN (${destPh})`,
-          [...originCodes, ...destinationCodes],
-        )
-      ).rows.filter((r) => utcDay(r.departs_at) === date);
+      const rows = (await flightsBetween(db, originCodes, destinationCodes)).filter(
+        (r) => utcDay(r.departs_at) === date,
+      );
       rows.sort((a, b) => iso(a.departs_at).localeCompare(iso(b.departs_at)));
       return {
         results: rows.map((r) => ({
@@ -109,6 +139,118 @@ export function createFlightTools(db: Queryable): ToolDef[] {
             date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "ISO date YYYY-MM-DD (UTC)" },
           },
           required: ["origin", "destination", "date"],
+        },
+      }),
+  };
+
+  const findFirstAvailableFlight: ToolDef = {
+    name: "find_first_available_flight",
+    description:
+      "Find the earliest flight in a month or date range that still has an available seat, optionally in a given class. Omit origin and destination to search every route. Use this instead of calling search_flights day by day for open-ended requests like 'first available flight this month'. Returns flight details, times, price, and sample seats.",
+    schema: findFirstAvailableFlightInput,
+    run: async (args, _ctx) => {
+      const parsed = findFirstAvailableFlightInput.parse(args);
+      const { origin, destination } = parsed;
+      const cabin = parsed.class;
+      if ((parsed.from_date && !parsed.to_date) || (!parsed.from_date && parsed.to_date)) {
+        return { error: "from_date and to_date must be supplied together" };
+      }
+      const range =
+        parsed.from_date && parsed.to_date
+          ? { from: parsed.from_date, to: parsed.to_date }
+          : monthBounds(parsed.month, new Date());
+      if (range.from > range.to) {
+        return { error: "from_date must not be after to_date" };
+      }
+
+      await releaseExpiredHolds(db);
+      const searched = {
+        ...range,
+        origin: origin ?? null,
+        destination: destination ?? null,
+        class: cabin ?? null,
+      };
+      if (Boolean(origin) !== Boolean(destination)) {
+        return { error: "supply both origin and destination, or neither" };
+      }
+
+      let candidates: Record<string, unknown>[];
+      if (origin && destination) {
+        const originCodes = await resolveCodes(db, origin);
+        const destinationCodes = await resolveCodes(db, destination);
+        if (originCodes.length === 0 || destinationCodes.length === 0) {
+          return { results: [], searched };
+        }
+        candidates = await flightsBetween(db, originCodes, destinationCodes);
+      } else {
+        candidates = await allFlights(db);
+      }
+      candidates = candidates
+        .filter((r) => {
+          const day = utcDay(r.departs_at);
+          return day >= range.from && day <= range.to;
+        })
+        .sort((a, b) => iso(a.departs_at).localeCompare(iso(b.departs_at)));
+
+      for (const flight of candidates) {
+        const seatRows = (
+          await db.query(
+            "SELECT seat_no, class, price FROM seat WHERE flight_id = $1 AND status = 'available'",
+            [flight.id],
+          )
+        ).rows.filter((r) => !cabin || r.class === cabin);
+        if (seatRows.length === 0) continue;
+        seatRows.sort((a, b) => {
+          const [ra, la] = seatSortKey(String(a.seat_no));
+          const [rb, lb] = seatSortKey(String(b.seat_no));
+          return ra - rb || la.localeCompare(lb);
+        });
+        const prices = seatRows
+          .map((s) => Number(s.price))
+          .filter((p) => Number.isFinite(p));
+        return {
+          results: [
+            {
+              flight_id: flight.id,
+              flight_no: flight.flight_no,
+              origin: flight.origin,
+              destination: flight.destination,
+              departs_at: iso(flight.departs_at),
+              arrives_at: iso(flight.arrives_at),
+              base_price: flight.base_price,
+              available_seat_count: seatRows.length,
+              min_seat_price: prices.length ? Math.min(...prices).toFixed(2) : null,
+              example_seats: seatRows.slice(0, 3).map((s) => ({
+                seat_no: s.seat_no,
+                class: s.class,
+                price: s.price,
+              })),
+            },
+          ],
+          searched,
+        };
+      }
+      return { results: [], searched };
+    },
+    toOllamaSchema: () =>
+      toolToOllamaSchema({
+        name: findFirstAvailableFlight.name,
+        description: findFirstAvailableFlight.description,
+        parameters: {
+          type: "object",
+          properties: {
+            origin: { type: "string", description: "Optional IATA code or city name; supply together with destination" },
+            destination: { type: "string", description: "Optional IATA code or city name; omit both to search every route" },
+            month: {
+              type: "string",
+              pattern: "^\\d{4}-\\d{2}$",
+              description: "ISO month YYYY-MM, e.g. 2026-11. Defaults to the current UTC month.",
+            },
+            from_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "Start date of an explicit range" },
+            to_date: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "End date of an explicit range, inclusive" },
+            class: { type: "string", enum: ["economy", "business"] },
+          },
+          required: [],
         },
       }),
   };
@@ -256,5 +398,11 @@ export function createFlightTools(db: Queryable): ToolDef[] {
       }),
   };
 
-  return [searchFlights, getFlightDetails, listAvailableSeats, listMyBookings];
+  return [
+    searchFlights,
+    findFirstAvailableFlight,
+    getFlightDetails,
+    listAvailableSeats,
+    listMyBookings,
+  ];
 }

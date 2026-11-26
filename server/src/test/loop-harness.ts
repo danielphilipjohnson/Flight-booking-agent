@@ -122,6 +122,76 @@ const secondCallMessages = client1.seenMessages[1]!;
 ok(secondCallMessages.some((m) => m.role === "tool" && m.name === "search_flights" && m.content.includes("FF")), "tool result fed back to the model on the next iteration");
 ok(secondCallMessages[0]!.role === "system" && secondCallMessages[0]!.content === systemPrompt, "same system prompt reused across iterations");
 
+console.log("\n# open-ended 'first available flight' uses one range tool call");
+const rangeClient = fakeClient([
+  toolCallChunks("c2", "find_first_available_flight", ['{"month":"2026-11"}']),
+  textChunks("I found the first available flight this month."),
+]);
+const rangeResult = await driveLoop({
+  client: rangeClient,
+  model: "fake",
+  systemPrompt,
+  history: [],
+  userMessage: "can you check this month and find me the first available flight?",
+  tools,
+  ctx: { userRef: "ava" },
+});
+ok(
+  rangeResult.toolTrace.length === 1 &&
+    rangeResult.toolTrace[0]!.name === "find_first_available_flight" &&
+    rangeResult.toolTrace[0]!.status === "ok",
+  "first-available request resolves with one find_first_available_flight call",
+);
+ok(
+  rangeResult.reply.includes("first available flight"),
+  "final answer is built from the single range tool call",
+);
+
+console.log("\n# empty model completion -> warn, retry once, then fail loudly");
+function emptyChunks(thinking = "reasoning only"): ChatChunk[] {
+  return [
+    {
+      message: { role: "assistant", content: "", thinking },
+      done: true,
+      done_reason: "stop",
+    },
+  ];
+}
+const warnings: string[] = [];
+const recovered = await driveLoop({
+  client: fakeClient([emptyChunks(), textChunks("Recovered answer.")]),
+  model: "fake",
+  systemPrompt,
+  history: [],
+  userMessage: "a front window seat",
+  tools,
+  ctx: { userRef: "ava" },
+  onWarning: (message) => warnings.push(message),
+});
+ok(recovered.reply === "Recovered answer.", "empty completion is retried and can recover");
+ok(
+  warnings.length === 1 && warnings[0]!.includes("empty response"),
+  "empty completion is surfaced as a warning with diagnostics",
+);
+let thrown = "";
+try {
+  await driveLoop({
+    client: fakeClient([emptyChunks(), emptyChunks()]),
+    model: "fake",
+    systemPrompt,
+    history: [],
+    userMessage: "a front window seat",
+    tools,
+    ctx: { userRef: "ava" },
+  });
+} catch (err) {
+  thrown = (err as Error).message;
+}
+ok(
+  thrown.includes("empty response") && thrown.includes("thinking_chars"),
+  "persistent empty completion throws with diagnostics instead of an empty bubble",
+);
+
 console.log("\n# invalid arguments -> error tool result, model self-corrects");
 const client2 = fakeClient([
   toolCallChunks("c1", "search_flights", ['{"origin":"LHR","destination":"LIS","date":"tomorrow"}']),

@@ -21,6 +21,37 @@ export const searchFlightsInput = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "ISO date YYYY-MM-DD"),
 });
 
+export const findFirstAvailableFlightInput = z.object({
+  origin: z
+    .string()
+    .min(2)
+    .max(40)
+    .optional()
+    .describe("IATA code or city name; omit together with destination to search every route"),
+  destination: z
+    .string()
+    .min(2)
+    .max(40)
+    .optional()
+    .describe("IATA code or city name; omit together with origin to search every route"),
+  month: z
+    .string()
+    .regex(/^\d{4}-\d{2}$/, "ISO month YYYY-MM")
+    .optional()
+    .describe("Month to search, e.g. 2026-11; defaults to the current UTC month"),
+  from_date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "ISO date YYYY-MM-DD")
+    .optional()
+    .describe("Start of an explicit date range"),
+  to_date: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, "ISO date YYYY-MM-DD")
+    .optional()
+    .describe("End of an explicit date range, inclusive"),
+  class: z.enum(["economy", "business"]).optional(),
+});
+
 export const getFlightDetailsInput = z.object({
   flight_id: z.string().uuid(),
 });

@@ -39,9 +39,12 @@ export interface ChatChunk {
   message?: {
     role?: string;
     content?: string;
+    /** Thinking models (gpt-oss, qwen3.8, glm) emit reasoning here. */
+    thinking?: string;
     tool_calls?: RawToolCallFragment[];
   };
   done?: boolean;
+  done_reason?: string;
   eval_count?: number;
   prompt_eval_count?: number;
   error?: string;
@@ -57,6 +60,8 @@ export interface ChatResult {
   message: AssembledMessage;
   evalCount: number;
   promptEvalCount: number;
+  thinking: string;
+  doneReason?: string;
 }
 
 export interface OllamaClient {
@@ -119,6 +124,8 @@ export function assembleChat(chunks: Iterable<ChatChunk>): ChatResult {
   let role = "assistant";
   let evalCount = 0;
   let promptEvalCount = 0;
+  let thinking = "";
+  let doneReason: string | undefined;
   const calls = new Map<
     number,
     {
@@ -133,6 +140,8 @@ export function assembleChat(chunks: Iterable<ChatChunk>): ChatResult {
     const message = chunk.message;
     if (message?.role) role = message.role;
     if (message?.content) content += message.content;
+    if (message?.thinking) thinking += message.thinking;
+    if (chunk.done_reason) doneReason = chunk.done_reason;
     for (const fragment of message?.tool_calls ?? []) {
       const index = fragment.index ?? fragment.function?.index ?? 0;
       let entry = calls.get(index);
@@ -170,5 +179,7 @@ export function assembleChat(chunks: Iterable<ChatChunk>): ChatResult {
     message: { role, content, tool_calls: toolCalls },
     evalCount,
     promptEvalCount,
+    thinking,
+    ...(doneReason ? { doneReason } : {}),
   };
 }
