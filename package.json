@@ -12,7 +12,7 @@
     "dev:web": "npm run dev --workspace web",
     "seed": "npm run seed --workspace server",
     "seed:check": "npm run seed:check --workspace server",
-    "test": "npm run harness --workspace server"
+    "test": "npm run harness --workspace server && npm run harness:agent --workspace server"
   },
   "engines": {
     "node": ">=22.18"

@@ -40,12 +40,14 @@ user (browser) --> Next.js chat UI --> POST /api/chat (SSE) --> Fastify agent AP
 │       │   ├── postgres.ts # pg Pool + transaction helper
 │       │   ├── mongo.ts    # session + message persistence
 │       │   └── schema.sql  # tables, constraints, ownership scoping
-│       ├── routes/         # /api/health (chat routes land in Phase 2)
+│       ├── routes/         # /api/health, /api/auth/verify, /api/chat, /api/chat/stream,
+│       │   │           # /api/sessions/:id
+│       ├── agent/         # agent loop, read tools, shortlist ranking, history (Phase 2)
 │       └── seed/
 │           ├── generate.ts # deterministic dataset generator (mulberry32 + name-based UUIDs)
 │           ├── seed.ts     # CLI: --check preview, or TRUNCATE + insert into Postgres
 │           └── harness.ts  # invariant assertions + sqlite constraint simulation
-└── web/                    # Next.js chat UI
+├── web/                    # Next.js chat UI (mock-user sign-in, SSE, tool chips)
     └── src/app/
 ```
 
