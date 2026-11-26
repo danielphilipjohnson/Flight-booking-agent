@@ -27,6 +27,9 @@ user (browser) --> Next.js chat UI --> POST /api/chat (SSE) --> Fastify agent AP
 | Chat history | MongoDB | One document per session, `$push` appends |
 | Infra | Docker Compose | `postgres` + `mongo` + `ollama`, one command up |
 
+For how the search agent behaves and how conversations are designed to flow,
+see [docs/flight-search-agent.md](docs/flight-search-agent.md).
+
 ## Repo layout
 
 ```
