@@ -67,9 +67,13 @@ npm run dev:server   # Fastify agent API on :3001
 npm run dev:web      # Next chat UI on :3000
 ```
 
-`npm test` runs the seed harness (no database needed): structural invariants of
-the generated dataset plus a `node:sqlite` simulation of `schema.sql` proving the
-constraints reject bad rows (unknown IATA, inverted times, double-claimed seat).
+`npm test` runs three no-database suites: the seed harness (structural
+invariants of the generated dataset plus a `node:sqlite` simulation of
+`schema.sql` proving the constraints reject bad rows), the agent harness
+(airport resolution, date windows, shortlist ranking, tool schemas,
+`filter_offers` ordering), and a deterministic fuzzer (seed=42, 3000 randomized
+cases) asserting the tool schemas, ranking, resolver and message-normalization
+layers never throw or violate their invariants on junk input.
 
 ## Design decisions that carry the portfolio story
 

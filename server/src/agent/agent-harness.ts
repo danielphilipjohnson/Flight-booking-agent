@@ -57,6 +57,7 @@ ok(resolveAirports("Japan", AIRPORTS).candidates.length === 0, "unknown place yi
 section("dates");
 ok(parseIsoDate("2026-12-01") !== null, "valid ISO date parses");
 ok(parseIsoDate("2026-13-01") === null, "invalid month rejected");
+ok(parseIsoDate("2026-02-30") === null, "impossible calendar date rejected (no rollover)");
 ok(parseIsoDate("tomorrow") === null, "non-ISO date rejected");
 ok(parseHhmm("07:30") === 450, "HH:MM parses to minutes");
 ok(parseHhmm("25:00") === null, "invalid hour rejected");

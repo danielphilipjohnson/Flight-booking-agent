@@ -84,7 +84,9 @@ export function normalizeToolCalls(message: OllamaMessage): NormalizedToolCall[]
     const parsed =
       typeof args === "string"
         ? (safeParse(args) ?? {})
-        : args ?? {};
+        : typeof args === "object" && args !== null && !Array.isArray(args)
+          ? args
+          : {};
     return { function: { name: call.function.name, arguments: parsed } };
   });
 }
