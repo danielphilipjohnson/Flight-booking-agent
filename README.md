@@ -112,7 +112,9 @@ constraints reject bad rows (unknown IATA, inverted times, double-claimed seat).
 | Method + path | Purpose |
 | --- | --- |
 | `GET /api/health` | 200 when Postgres + Mongo reachable |
+| `POST /api/auth/verify` | Mock sign-in: user_ref + PIN against `app_user` |
 | `POST /api/chat` | Body: session/user ref + message; runs agent loop (Phase 2) |
 | `POST /api/chat/stream` | SSE twin: typing / token / tool / confirm / done / error events |
 | `GET /api/sessions/:id` | History from Mongo, per-user scoped |
+| `DELETE /api/chat/:sessionId` | Release pinned offers for a session |
 | `POST /api/tools/:name/confirm` | Confirm-before-write gate for hold/create/cancel |

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { pool } from "../db/postgres.ts";
 import { resolveAirports, type AirportRowLite } from "./airports.ts";
-import { dayEndUtc, dayStartUtc, hhmmUtc, isoDay, parseHhmm, parseIsoDate } from "./dates.ts";
+import { dateWindow, dayEndUtc, dayStartUtc, hhmmUtc, isoDay, parseHhmm, parseIsoDate } from "./dates.ts";
 import { rankOffers, type Offer, type Shortlist } from "./shortlist.ts";
 
 export interface ToolContext {
@@ -107,22 +107,25 @@ function toOffer(row: FlightRowAgg, passengers: number, cabin: "economy" | "busi
   };
 }
 
-function shortlistPayload(offers: Offer[]): {
+type OfferOrder = (a: Offer, b: Offer) => number;
+
+const byBest: OfferOrder = (a, b) =>
+  a.price_total - b.price_total || a.departs_at.localeCompare(b.departs_at);
+const byFastest: OfferOrder = (a, b) =>
+  a.duration_minutes - b.duration_minutes || a.price_total - b.price_total;
+
+function shortlistPayload(offers: Offer[], order: OfferOrder = byBest): {
   total_results: number;
   shortlist: Shortlist;
   alternatives: Offer[];
   note: string;
 } {
   const ranked = rankOffers(offers)!;
-  const bestOrder = [...offers].sort((a, b) => {
-    if (a.price_total !== b.price_total) return a.price_total - b.price_total;
-    return a.departs_at.localeCompare(b.departs_at);
-  });
   const picked = new Set([ranked.best.flight_id, ranked.cheapest.flight_id, ranked.fastest.flight_id]);
   return {
     total_results: offers.length,
     shortlist: ranked,
-    alternatives: bestOrder.filter((o) => !picked.has(o.flight_id)).slice(0, 5),
+    alternatives: [...offers].sort(order).filter((o) => !picked.has(o.flight_id)).slice(0, 5),
     note: "Prices are demo data in EUR for the cheapest available seat in the requested cabin; seat inventory is as of this search.",
   };
 }
@@ -180,8 +183,12 @@ async function nearbySuggestions(
 
 const pinnedOffers = new Map<string, Offer[]>();
 
-function pinOffers(sessionId: string, offers: Offer[]): void {
+export function setPinnedOffers(sessionId: string, offers: Offer[]): void {
   pinnedOffers.set(sessionId, offers);
+}
+
+function pinOffers(sessionId: string, offers: Offer[]): void {
+  setPinnedOffers(sessionId, offers);
 }
 
 export function pinnedOfferCount(sessionId: string): number {
@@ -323,11 +330,11 @@ export function buildToolDefs(): ToolDef[] {
         const destSet = resolveSet(rows, destination);
         if ("error" in destSet) return destSet;
 
-        const toDate = dayEndUtc(from_date).getTime() + (days - 1) * 86_400_000;
-        const to_date = isoDay(new Date(toDate));
+        const window = dateWindow(from_date, days);
+        const to_date = window.to;
         const result = await pool.query<FlightRowAgg>(
           FLIGHT_AGG_SQL,
-          [originSet.iatas, destSet.iatas, cabin, dayStartUtc(from_date), dayEndUtc(to_date), passengers],
+          [originSet.iatas, destSet.iatas, cabin, window.start, window.end, passengers],
         );
         const offers = result.rows.map((row) => toOffer(row, passengers, cabin));
         if (offers.length === 0) {
@@ -391,7 +398,8 @@ export function buildToolDefs(): ToolDef[] {
         if ("error" in originSet) return originSet;
 
         const start = from_date ?? isoDay(new Date());
-        const to_date = isoDay(new Date(dayEndUtc(start).getTime() + (days - 1) * 86_400_000));
+        const window = dateWindow(start, days);
+        const to_date = window.to;
         const result = await pool.query<{
           destination: string;
           city: string;
@@ -411,7 +419,7 @@ export function buildToolDefs(): ToolDef[] {
            GROUP BY f.destination, d.city, d.country
            HAVING MIN(s.price) FILTER (WHERE s.status = 'available') IS NOT NULL
            ORDER BY min_price`,
-          [originSet.iatas, dayStartUtc(start), dayEndUtc(to_date)],
+          [originSet.iatas, window.start, window.end],
         );
         const destinations = result.rows
           .map((row) => ({
@@ -487,15 +495,10 @@ export function buildToolDefs(): ToolDef[] {
             note: "Nothing matches these filters. Suggest relaxing one of them, or re-run search_flight_offers for nearby dates.",
           };
         }
-        const sorted =
-          sort === "cheapest"
-            ? [...filtered].sort((a, b) => a.price_total - b.price_total)
-            : sort === "fastest"
-              ? [...filtered].sort((a, b) => a.duration_minutes - b.duration_minutes)
-              : filtered;
+        const order = sort === "fastest" ? byFastest : byBest;
         return {
           filters: { max_price, depart_after, depart_before, sort },
-          ...shortlistPayload(sorted),
+          ...shortlistPayload(filtered, order),
         };
       },
     },

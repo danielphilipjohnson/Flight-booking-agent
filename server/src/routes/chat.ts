@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { runAgent } from "../agent/loop.ts";
 import { clearPinnedOffers, pinnedOfferCount } from "../agent/tools.ts";
-import { verifyCredentials } from "./auth.ts";
+import { verifyCredentials } from "../db/users.ts";
 
 const chatBody = z.object({
   session_id: z.string().min(1),
@@ -63,6 +63,14 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
 
+    let disconnected = false;
+    raw.on("error", () => {
+      disconnected = true;
+    });
+    const heartbeat = setInterval(() => {
+      if (!disconnected) raw.write(": ping\n\n");
+    }, 15_000);
+
     send("start", { session_id: parsed.sessionId, user: parsed.displayName });
     try {
       for await (const event of runAgent(parsed)) {
@@ -76,8 +84,11 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       }
       send("done", { session_id: parsed.sessionId, pinned_offers: pinnedOfferCount(parsed.sessionId) });
     } catch (err) {
-      send("error", { message: err instanceof Error ? err.message : String(err) });
+      if (!disconnected) {
+        send("error", { message: err instanceof Error ? err.message : String(err) });
+      }
     } finally {
+      clearInterval(heartbeat);
       raw.end();
     }
   });

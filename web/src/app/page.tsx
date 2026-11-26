@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const MOCK_USERS = ["ava", "ben", "chloe", "dan", "elena"];
 
@@ -27,7 +27,16 @@ export default function Home() {
   const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const sessionId = useRef<string>(crypto.randomUUID());
+  const [sessionId, setSessionId] = useState("");
+  const entriesRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setSessionId(crypto.randomUUID());
+  }, []);
+
+  useEffect(() => {
+    entriesRef.current?.scrollTo({ top: entriesRef.current.scrollHeight });
+  }, [entries]);
 
   const signIn = useCallback(async () => {
     setAuthError(null);
@@ -43,7 +52,7 @@ export default function Home() {
         return;
       }
       const body = (await res.json()) as { display_name: string };
-      sessionId.current = crypto.randomUUID();
+      setSessionId(crypto.randomUUID());
       setEntries([]);
       setUser({ ref: userRef, name: body.display_name });
     } catch {
@@ -53,7 +62,7 @@ export default function Home() {
 
   const send = useCallback(
     async (text: string) => {
-      if (!user || busy || text.trim().length === 0) return;
+      if (!user || busy || text.trim().length === 0 || !sessionId) return;
       setBusy(true);
       setInput("");
       setEntries((prev) => [...prev, { kind: "message", role: "user", content: text }]);
@@ -74,7 +83,7 @@ export default function Home() {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            session_id: sessionId.current,
+            session_id: sessionId,
             user_ref: user.ref,
             pin,
             message: text,
@@ -133,7 +142,7 @@ export default function Home() {
         setBusy(false);
       }
     },
-    [busy, pin, user],
+    [busy, pin, sessionId, user],
   );
 
   if (!user) {
@@ -171,18 +180,26 @@ export default function Home() {
     <main className="chat">
       <header>
         <span>
-          {user.name} · session {sessionId.current.slice(0, 8)}
+          {user.name}
+          {sessionId ? ` · session ${sessionId.slice(0, 8)}` : ""}
         </span>
         <button
-          onClick={() => {
-            sessionId.current = crypto.randomUUID();
+          onClick={async () => {
+            if (sessionId) {
+              await fetch(`/api/chat/${sessionId}`, {
+                method: "DELETE",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ session_id: sessionId, user_ref: user.ref, pin }),
+              }).catch(() => undefined);
+            }
+            setSessionId(crypto.randomUUID());
             setEntries([]);
           }}
         >
           New session
         </button>
       </header>
-      <div className="entries">
+      <div className="entries" ref={entriesRef}>
         {entries.map((entry, i) =>
           entry.kind === "tool" ? (
             <div key={i} className="chip">

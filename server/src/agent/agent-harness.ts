@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { resolveAirports, type AirportRowLite } from "./airports.ts";
-import { addDays, hhmmUtc, isoDay, parseHhmm, parseIsoDate } from "./dates.ts";
+import { addDays, dateWindow, hhmmUtc, isoDay, parseHhmm, parseIsoDate } from "./dates.ts";
 import { normalizeToolCalls, stripThinking } from "./ollama.ts";
 import { rankOffers, type Offer } from "./shortlist.ts";
-import { buildToolDefs, pinnedOfferCount } from "./tools.ts";
+import { buildToolDefs, pinnedOfferCount, setPinnedOffers } from "./tools.ts";
 
 let passed = 0;
 function ok(condition: boolean, label: string): void {
@@ -125,5 +125,46 @@ const brokenArgs = normalizeToolCalls({
   tool_calls: [{ function: { name: "search_flight_offers", arguments: "{oops" } }],
 });
 ok(brokenArgs.length === 1 && Object.keys(brokenArgs[0]!.function.arguments).length === 0, "malformed arguments degrade to empty object");
+
+
+section("date windows");
+const window7 = dateWindow("2026-12-01", 7);
+ok(window7.to === "2026-12-07", "7-day window ends on the 7th day");
+ok((window7.end.getTime() - window7.start.getTime()) / 86_400_000 === 7, "window spans exactly the requested days");
+const window1 = dateWindow("2026-12-31", 1);
+ok(window1.to === "2026-12-31" && window1.end.getTime() > window1.start.getTime(), "single-day window is one day");
+
+section("filter_offers ordering over pinned offers");
+const pinned = [
+  offer({ flight_no: "A1", price_total: 90, duration_minutes: 180, departs_at: "09:00" }),
+  offer({ flight_no: "B2", price_total: 110, duration_minutes: 110, departs_at: "11:00" }),
+  offer({ flight_no: "C3", price_total: 130, duration_minutes: 95, departs_at: "13:00" }),
+  offer({ flight_no: "D4", price_total: 100, duration_minutes: 150, departs_at: "10:00" }),
+  offer({ flight_no: "E5", price_total: 120, duration_minutes: 120, departs_at: "15:00" }),
+  offer({ flight_no: "F6", price_total: 140, duration_minutes: 100, departs_at: "16:00" }),
+];
+setPinnedOffers("rev-pins", pinned);
+ok(pinnedOfferCount("rev-pins") === 6, "offers pinned for session");
+const defaultRun = (await byName.get("filter_offers")!.run({}, { sessionId: "rev-pins" })) as {
+  shortlist: { best: { flight_no: string }; cheapest: { flight_no: string }; fastest: { flight_no: string } };
+  alternatives: { flight_no: string }[];
+};
+ok(defaultRun.shortlist.best.flight_no === "B2", "default ranking balances price and duration");
+ok(defaultRun.shortlist.cheapest.flight_no === "A1" && defaultRun.shortlist.fastest.flight_no === "C3", "cheapest and fastest slots unchanged");
+ok(
+  defaultRun.alternatives.map((o) => o.flight_no).join(",") === "D4,E5,F6",
+  "default alternatives are price-ordered",
+);
+const fastestRun = (await byName.get("filter_offers")!.run({ sort: "fastest" }, { sessionId: "rev-pins" })) as {
+  alternatives: { flight_no: string }[];
+};
+ok(
+  fastestRun.alternatives.map((o) => o.flight_no).join(",") === "F6,E5,D4",
+  "fastest sort reorders alternatives by duration",
+);
+const priceCapRun = (await byName.get("filter_offers")!.run({ max_price: 95 }, { sessionId: "rev-pins" })) as {
+  total_results: number;
+};
+ok(priceCapRun.total_results === 1, "max_price filter narrows to one offer");
 
 console.log(`\nall ${passed} agent checks passed`);

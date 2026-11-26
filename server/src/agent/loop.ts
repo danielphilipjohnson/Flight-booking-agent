@@ -1,5 +1,5 @@
-import { pool } from "../db/postgres.ts";
 import type { StoredMessage } from "../db/mongo.ts";
+import { verifyCredentials } from "../db/users.ts";
 import { appendMessages, ensureSession, loadHistory } from "./history.ts";
 import {
   normalizeToolCalls,
@@ -25,18 +25,6 @@ export interface AgentOptions {
   now?: Date;
 }
 
-interface LookupRow {
-  display_name: string;
-}
-
-async function verifyPin(userRef: string, pin: string): Promise<void> {
-  const result = await pool.query<LookupRow>(
-    "SELECT display_name FROM app_user WHERE user_ref = $1 AND pin = $2",
-    [userRef, pin],
-  );
-  if (result.rowCount === 0) throw new Error("Unknown user or wrong PIN");
-}
-
 function summarize(name: string, args: Record<string, unknown>): string {
   const parts: string[] = [];
   for (const key of ["origin", "destination", "date", "from_date", "query", "max_price", "sort"]) {
@@ -51,7 +39,8 @@ function toHistoryMessage(role: "user" | "assistant", content: string): StoredMe
 }
 
 export async function* runAgent(options: AgentOptions): AsyncGenerator<AgentEvent> {
-  await verifyPin(options.userRef, options.pin);
+  const displayName = await verifyCredentials(options.userRef, options.pin);
+  if (!displayName) throw new Error("Unknown user or wrong PIN");
   await ensureSession(options.sessionId, options.userRef);
   const history = await loadHistory(options.sessionId, options.userRef);
   const tools = buildToolDefs();
@@ -71,6 +60,8 @@ export async function* runAgent(options: AgentOptions): AsyncGenerator<AgentEven
   ];
 
   let reply = "";
+
+  await appendMessages(options.sessionId, options.userRef, [toHistoryMessage("user", options.message)]);
 
   for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
     const response = await ollamaChat(messages, ollamaTools);
@@ -118,10 +109,9 @@ export async function* runAgent(options: AgentOptions): AsyncGenerator<AgentEven
     }
   }
 
-  await appendMessages(options.sessionId, options.userRef, [
-    toHistoryMessage("user", options.message),
-    toHistoryMessage("assistant", reply),
-  ]);
+  if (reply) {
+    await appendMessages(options.sessionId, options.userRef, [toHistoryMessage("assistant", reply)]);
+  }
 
   yield { type: "message", content: reply };
 }

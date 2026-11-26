@@ -26,6 +26,19 @@ export function addDays(iso: string, days: number): string {
   return isoDay(new Date(dayStartUtc(iso).getTime() + days * 86_400_000));
 }
 
+export interface DateWindow {
+  from: string;
+  to: string;
+  start: Date;
+  end: Date;
+}
+
+export function dateWindow(fromIso: string, days: number): DateWindow {
+  const start = dayStartUtc(fromIso);
+  const to = addDays(fromIso, days - 1);
+  return { from: fromIso, to, start, end: dayEndUtc(to) };
+}
+
 export function hhmmUtc(date: Date): string {
   return date.toISOString().slice(11, 16);
 }

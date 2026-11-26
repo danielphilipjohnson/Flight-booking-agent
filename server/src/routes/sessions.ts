@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { sessions } from "../db/mongo.ts";
-import { verifyCredentials } from "./auth.ts";
+import { verifyCredentials } from "../db/users.ts";
 
 export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/sessions/:id", async (request, reply) => {
