@@ -36,11 +36,11 @@ The agent layer lives in `server/src/agent/` + `server/src/tools/`:
 
 | Tool | When it fires | What it returns |
 | --- | --- | --- |
-| `search_flights` | The user wants flights for a specific date (optional `return_date` for round trips) | Outbound flights sorted by departure (`flight_id`, `flight_no`, airports, times, duration, `base_price`, `on_time_pct`); round trips add `return_results` and `round_trip_total_from` (or `empty_leg` when one leg has no flights) |
+| `search_flights` | The user wants flights for a specific date (optional `return_date` for round trips) | Outbound flights sorted by departure (`flight_id`, `flight_no`, airports, times, duration, `base_price`, `on_time_pct`); round trips add `return_results` and `round_trip_total_from` (or `empty_leg` when one leg has no flights); empty results carry `resolved` airport codes, plus a `note` when a place matched no airport |
 | `search_flexible_prices` | The date is vague ("next week", "around the 14th") | Per-day cheapest prices over the window, `cheapest_day` highlighted |
 | `search_anywhere` | The user has no destination and no theme ("where can I go for under 300?") | Up to 10 destinations from the origin, cheapest-price order |
 | `search_inspiration` | The user has a theme, not a place ("somewhere warm", "beach", "skiing") | Theme-matched destinations price-ranked (beach: LIS/BCN/MAD) |
-| `filter_offers` | Refining the last search ("cheaper", "not before noon") | Filtered + re-sorted results from the pinned last search, no re-query |
+| `filter_offers` | Refining the last search ("cheaper", "not before noon") | Filtered + re-sorted results from the pinned last search, no re-query; after a round trip, `leg: "return"` targets the return leg (default outbound) |
 | `find_first_available_flight` | The date is open-ended ("any day this month") | First date with flights in the range, plus that day's flights |
 | `get_flight_details` | "Is a carry-on included?", "can I cancel?" | Flight facts (airline, on-time pct) plus per-class `fare_rules`: cheapest available seat's fare brand (Basic/Standard/Flex), bags, refundability, change fee, price |
 | `list_available_seats` | The user cares about the specific seat | Seat map for a flight: row, letter, cabin, status, fare brand |
@@ -186,8 +186,10 @@ handoff point for the confirm -> `hold_seat` -> passenger details flow.
 >
 > Would either of those work, or shall I check different dates?
 
-The tool returns `suggestions` (nearby dates with prices, destinations
-reachable from the origin); the agent turns them into choices.
+The empty result carries `resolved` airport codes (and a `note` when a place
+matched no airport), so the agent can tell "no service that date" from "not in
+the network" and turn the route brief into nearby-date / reachable-destination
+choices instead of a dead end.
 
 ## Presenting results
 

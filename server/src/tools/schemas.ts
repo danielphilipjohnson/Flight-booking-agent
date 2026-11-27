@@ -52,6 +52,7 @@ export const filterOffersInput = z.object({
   depart_after: z.string().regex(/^\d{2}:\d{2}$/, "HH:MM UTC").refine((v) => parseHhmm(v) !== null, "valid UTC time").optional(),
   depart_before: z.string().regex(/^\d{2}:\d{2}$/, "HH:MM UTC").refine((v) => parseHhmm(v) !== null, "valid UTC time").optional(),
   sort: z.enum(["best", "cheapest", "fastest"]).optional(),
+  leg: z.enum(["outbound", "return"]).optional().describe("Which leg of a round-trip search to filter; default outbound"),
 });
 
 export const findFirstAvailableFlightInput = z.object({

@@ -70,5 +70,7 @@ ok(!searchInspirationInput.safeParse({ origin: "LHR" }).success, "search_inspira
 ok(!getFlightDetailsInput.safeParse({ flight_id: "not-a-uuid" }).success, "get_flight_details rejects non-uuid ids");
 ok(filterOffersInput.safeParse({}).success, "filter_offers accepts empty filters");
 ok(!filterOffersInput.safeParse({ depart_after: "25:00" }).success, "filter_offers rejects invalid times");
+ok(filterOffersInput.safeParse({ leg: "return" }).success, "filter_offers accepts leg: return");
+ok(!filterOffersInput.safeParse({ leg: "both" }).success, "filter_offers rejects unknown legs");
 
 console.log(`\nall ${passed} unit checks passed`);

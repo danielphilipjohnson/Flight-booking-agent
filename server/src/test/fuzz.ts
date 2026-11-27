@@ -177,6 +177,7 @@ for (let i = 0; i < ITERATIONS; i++) {
     arrives_at: "2026-12-01T12:00:00.000Z",
     base_price: randInt(1, 5000),
     on_time_pct: randInt(80, 99),
+    leg: rng() < 0.3 ? ("return" as const) : ("outbound" as const),
   }));
   setPinnedOffers(`fuzz-${i}`, pins);
   const argsRaw = randomArgObject(2);
@@ -196,8 +197,10 @@ for (let i = 0; i < ITERATIONS; i++) {
     continue;
   }
   if (record.error !== undefined) continue;
+  const requestedLeg = (parsed.data as { leg?: "outbound" | "return" }).leg ?? "outbound";
   const results = (record.results ?? []) as PinnedOffer[];
   for (const offer of results) {
+    if ((offer.leg ?? "outbound") !== requestedLeg) fail("filtered result from the wrong leg", offer);
     if (parsed.data.max_price !== undefined && offer.base_price > parsed.data.max_price) {
       fail("filtered result exceeds max_price", offer);
     }
