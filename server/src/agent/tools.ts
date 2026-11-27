@@ -183,7 +183,14 @@ async function nearbySuggestions(
 
 const pinnedOffers = new Map<string, Offer[]>();
 
+const MAX_PINNED_SESSIONS = 200;
+
 export function setPinnedOffers(sessionId: string, offers: Offer[]): void {
+  while (pinnedOffers.size >= MAX_PINNED_SESSIONS && !pinnedOffers.has(sessionId)) {
+    const oldest = pinnedOffers.keys().next().value;
+    if (oldest === undefined) break;
+    pinnedOffers.delete(oldest);
+  }
   pinnedOffers.set(sessionId, offers);
 }
 

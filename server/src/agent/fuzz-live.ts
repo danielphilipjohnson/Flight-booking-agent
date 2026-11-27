@@ -36,11 +36,19 @@ function passengersArg(): number | undefined {
   return rng() < 0.6 ? 1 : randInt(1, 6);
 }
 
-function assertShortlistShape(result: Record<string, unknown>, passengers: number | undefined, label: string): void {
+function assertShortlistShape(
+  result: Record<string, unknown>,
+  passengers: number | undefined,
+  cabin: string | undefined,
+  label: string,
+): void {
   const shortlist = result.shortlist as Record<string, Offer> | undefined;
   if (!shortlist) fail(`${label}: shortlist missing despite results`, result);
   for (const slot of ["best", "cheapest", "fastest"] as const) {
     const offer = shortlist![slot]!;
+    if (cabin !== undefined && offer.cabin !== cabin) {
+      fail(`${label}: ${slot} cabin ${offer.cabin} != requested ${cabin}`, offer);
+    }
     if (passengers !== undefined) {
       if (offer.price_total !== Math.round(offer.price_per_person * passengers * 100) / 100) {
         fail(`${label}: ${slot} price_total != price_per_person * passengers`, offer);
@@ -49,7 +57,6 @@ function assertShortlistShape(result: Record<string, unknown>, passengers: numbe
         fail(`${label}: ${slot} offered with fewer seats than passengers`, offer);
       }
     }
-    if (offer.cabin !== (shortlist![slot]!.cabin)) fail(`${label}: ${slot} cabin missing`, offer);
   }
   const cheapest = shortlist!.cheapest!;
   for (const slot of ["best", "fastest"] as const) {
@@ -125,7 +132,9 @@ async function main(): Promise<void> {
     }
     if (record.total_results === 0) {
       noResults++;
-      if (record.suggestions === undefined) {
+      if (toolName === "search_anywhere") {
+        if (record.note === undefined) fail("search_anywhere: no-results payload missing note", result);
+      } else if (record.suggestions === undefined) {
         fail(`${toolName}: no-results payload missing suggestions`, result);
       }
       continue;
@@ -155,7 +164,7 @@ async function main(): Promise<void> {
       continue;
     }
 
-    assertShortlistShape(record, passengers, toolName);
+    assertShortlistShape(record, passengers, (parsed.data as { cabin?: string }).cabin, toolName);
 
     if (toolName === "search_flexible_dates") {
       const days = record.days as { date: string; min_price_per_person: number }[];
@@ -194,7 +203,7 @@ async function main(): Promise<void> {
       const filterRecord = filterResult as Record<string, unknown>;
       if (filterRecord.error !== undefined) fail("filter_offers: error despite pinned search", filterResult);
       if (((filterRecord.total_results as number | undefined) ?? 0) > 0) {
-        assertShortlistShape(filterRecord, passengers, "filter_offers");
+        assertShortlistShape(filterRecord, passengers, (filterParsed.data as { cabin?: string }).cabin, "filter_offers");
       }
     }
   }

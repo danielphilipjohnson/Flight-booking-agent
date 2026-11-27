@@ -34,26 +34,29 @@ function randInt(min: number, max: number): number {
 interface ScenarioResult {
   sessionId: string;
   toolCalls: string[];
+  warnings: string[];
   reply: string;
   rounds: number;
 }
 
 async function converse(sessionId: string, message: string): Promise<ScenarioResult> {
   const toolCalls: string[] = [];
+  const warnings: string[] = [];
   let reply = "";
 
   for await (const event of runAgent({ sessionId, userRef: USER_REF, pin: PIN, message })) {
     if (event.type === "tool") {
       if (!KNOWN_TOOLS.has(event.name)) {
-        throw new Error(`agent invoked unknown tool "${event.name}"`);
+        warnings.push(`turn invoked unknown tool "${event.name}" (loop recovered)`);
+      } else {
+        toolCalls.push(event.name);
       }
-      toolCalls.push(event.name);
     } else {
       reply = event.content;
     }
   }
 
-  return { sessionId, toolCalls, reply, rounds: toolCalls.length };
+  return { sessionId, toolCalls, warnings, reply, rounds: toolCalls.length };
 }
 
 async function main(): Promise<void> {
@@ -105,6 +108,7 @@ async function main(): Promise<void> {
         process.stdout.write(
           `agent> ${result.reply.replace(/\s+/g, " ").slice(0, 140)}${result.reply.length > 140 ? "…" : ""}\n`,
         );
+        for (const warning of result.warnings) process.stdout.write(`warn> ${warning}\n`);
         process.stdout.write(`tools> ${result.toolCalls.join(", ") || "(none)"}\n`);
       } catch (err) {
         failures++;

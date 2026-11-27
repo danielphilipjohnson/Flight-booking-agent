@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import {
   DAYS,
   DEMO_HOLD_MINUTES,
+  FARE_RULES,
   SEATS_PER_FLIGHT,
   SELLOUT_DEMO_HOLD_SEAT,
   USERS,
@@ -11,6 +12,13 @@ import {
   isWindowSeat,
   type Dataset,
 } from "./generate.ts";
+
+const MIGRATIONS: string[] = [
+  "ALTER TABLE airport ADD COLUMN IF NOT EXISTS tags TEXT NOT NULL DEFAULT ''",
+  "ALTER TABLE flight ADD COLUMN IF NOT EXISTS airline_code TEXT NOT NULL DEFAULT 'FF'",
+  "ALTER TABLE flight ADD COLUMN IF NOT EXISTS on_time_pct NUMERIC(5, 2) NOT NULL DEFAULT 95.00",
+  "ALTER TABLE seat ADD COLUMN IF NOT EXISTS fare_brand TEXT NOT NULL DEFAULT 'standard'",
+];
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const schemaPath = path.join(here, "..", "db", "schema.sql");
@@ -43,6 +51,12 @@ function preview(data: Dataset, seed: number): void {
       `bookedSeats=${bookedSeats} heldSeats=${heldSeats}`,
   );
   console.log(`fingerprint=${data.fingerprint}`);
+  console.log(`airline: ${data.airlines.map((a) => `${a.code} = ${a.name}`).join(", ")}`);
+  for (const rule of data.fareRules) {
+    console.log(
+      `fare ${rule.brand}: carry-on ${rule.carry_on ? "included" : "NOT included"}, ${rule.checked_bags} checked bag(s), ${rule.refundable ? "refundable" : "non-refundable"}, change fee ${rule.change_fee}`,
+    );
+  }
   const london = data.airports.filter((a) => a.city === "London").map((a) => a.iata);
   console.log(`London fan-out: London = ${london.join(" + ")}`);
 
@@ -122,30 +136,39 @@ async function writeToPostgres(data: Dataset): Promise<void> {
   try {
     const schema = await readFile(schemaPath, "utf8");
     await client.query(schema);
+    for (const migration of MIGRATIONS) {
+      await client.query(migration);
+    }
     await client.query("BEGIN");
     await client.query(
-      "TRUNCATE booking_seat, booking, seat, flight, app_user, airport RESTART IDENTITY CASCADE",
+      "TRUNCATE booking_seat, booking, seat, flight, app_user, airline, airport, fare_rule RESTART IDENTITY CASCADE",
     );
     for (const rows of chunk(data.airports, 100)) {
-      await insertChunk(client, "airport", ["iata", "name", "city", "country"], rows.map((a) => [a.iata, a.name, a.city, a.country]));
+      await insertChunk(client, "airport", ["iata", "name", "city", "country", "tags"], rows.map((a) => [a.iata, a.name, a.city, a.country, a.tags]));
+    }
+    for (const rows of chunk(data.airlines, 100)) {
+      await insertChunk(client, "airline", ["code", "name"], rows.map((a) => [a.code, a.name]));
     }
     for (const rows of chunk(data.users, 100)) {
       await insertChunk(client, "app_user", ["user_ref", "display_name", "pin"], rows.map((u) => [u.user_ref, u.display_name, u.pin]));
+    }
+    for (const rows of chunk(data.fareRules, 100)) {
+      await insertChunk(client, "fare_rule", ["brand", "carry_on", "checked_bags", "refundable", "changeable", "change_fee"], rows.map((r) => [r.brand, r.carry_on, r.checked_bags, r.refundable, r.changeable, r.change_fee]));
     }
     for (const rows of chunk(data.flights, 500)) {
       await insertChunk(
         client,
         "flight",
-        ["id", "flight_no", "origin", "destination", "departs_at", "arrives_at", "base_price"],
-        rows.map((f) => [f.id, f.flight_no, f.origin, f.destination, f.departs_at, f.arrives_at, f.base_price]),
+        ["id", "flight_no", "origin", "destination", "departs_at", "arrives_at", "base_price", "airline_code", "on_time_pct"],
+        rows.map((f) => [f.id, f.flight_no, f.origin, f.destination, f.departs_at, f.arrives_at, f.base_price, f.airline_code, f.on_time_pct]),
       );
     }
     for (const rows of chunk(data.seats, 2000)) {
       await insertChunk(
         client,
         "seat",
-        ["flight_id", "seat_no", "class", "price", "status", "hold_expires_at"],
-        rows.map((s) => [s.flight_id, s.seat_no, s.class, s.price, s.status, s.hold_expires_at]),
+        ["flight_id", "seat_no", "class", "fare_brand", "price", "status", "hold_expires_at"],
+        rows.map((s) => [s.flight_id, s.seat_no, s.class, s.fare_brand, s.price, s.status, s.hold_expires_at]),
       );
     }
     for (const rows of chunk(data.bookings, 100)) {
@@ -166,7 +189,7 @@ async function writeToPostgres(data: Dataset): Promise<void> {
     }
     await client.query("COMMIT");
     console.log(
-      `seeded: ${data.airports.length} airports, ${data.users.length} users, ${data.flights.length} flights, ${data.seats.length} seats, ${data.bookings.length} bookings, ${data.bookingSeats.length} booking_seats (fingerprint ${data.fingerprint})`,
+      `seeded: ${data.airports.length} airports, ${data.airlines.length} airline(s), ${data.users.length} users, ${data.flights.length} flights, ${data.seats.length} seats, ${data.bookings.length} bookings, ${data.bookingSeats.length} booking_seats, ${data.fareRules.length} fare rules (fingerprint ${data.fingerprint})`,
     );
   } catch (err) {
     await client.query("ROLLBACK");
