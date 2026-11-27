@@ -25,6 +25,7 @@ function pick<T>(items: readonly T[]): T {
 }
 
 const CITIES = ["London", "Manchester", "Lisbon", "Amsterdam", "Barcelona", "Paris", "Madrid", "Japan", "Tokyo"];
+const THEMES = ["beach", "warm", "city", "city break", "ski", "pub crawl"];
 const CABINS = ["economy", "business"] as const;
 
 function windowDate(offsetRange: number): string {
@@ -87,7 +88,7 @@ async function main(): Promise<void> {
 
   const tools = buildToolDefs();
   const byName = new Map(tools.map((t) => [t.name, t]));
-  const searchTools = ["search_flight_offers", "search_flexible_dates", "search_anywhere"] as const;
+  const searchTools = ["search_flight_offers", "search_flexible_dates", "search_anywhere", "search_inspiration"] as const;
   let searches = 0;
   let noResults = 0;
 
@@ -102,8 +103,12 @@ async function main(): Promise<void> {
     let args: Record<string, unknown>;
     if (toolName === "search_flight_offers") {
       args = { origin: pick(CITIES), destination: pick(CITIES), date: windowDate(15), passengers, cabin: pick(CABINS) };
+      if (rng() < 0.25) args.return_date = windowDate(18);
     } else if (toolName === "search_flexible_dates") {
       args = { origin: pick(CITIES), destination: pick(CITIES), from_date: windowDate(8), days: randInt(1, 14), passengers, cabin: pick(CABINS) };
+    } else if (toolName === "search_inspiration") {
+      args = { origin: pick(CITIES), theme: pick(THEMES), from_date: windowDate(8), days: randInt(1, 14) };
+      if (rng() < 0.4) args.max_price = randInt(30, 300);
     } else {
       args = { origin: pick(CITIES), from_date: windowDate(8), days: randInt(1, 14) };
       if (rng() < 0.4) args.max_price = randInt(30, 300);
@@ -124,16 +129,18 @@ async function main(): Promise<void> {
     const record = result as Record<string, unknown>;
 
     if (record.error !== undefined) {
-      const unknownUsed = [args.origin, args.destination].some(
-        (value) => value === "Japan" || value === "Tokyo",
-      );
+      const unknownUsed =
+        [args.origin, args.destination].some((value) => value === "Japan" || value === "Tokyo") ||
+        args.theme === "ski" ||
+        args.theme === "pub crawl";
       if (!unknownUsed) fail(`${toolName}: unexpected error for a known place`, result);
       continue;
     }
     if (record.total_results === 0) {
       noResults++;
-      if (toolName === "search_anywhere") {
-        if (record.note === undefined) fail("search_anywhere: no-results payload missing note", result);
+      const noteShaped = toolName === "search_anywhere" || toolName === "search_inspiration";
+      if (noteShaped) {
+        if (record.note === undefined) fail(`${toolName}: no-results payload missing note`, result);
       } else if (record.suggestions === undefined) {
         fail(`${toolName}: no-results payload missing suggestions`, result);
       }
@@ -141,7 +148,7 @@ async function main(): Promise<void> {
     }
 
     searches++;
-    if (toolName === "search_anywhere") {
+    if (toolName === "search_anywhere" || toolName === "search_inspiration") {
       const destinations = record.destinations as { destination: string; min_price_per_person: number; flights_available: number }[];
       if (!destinations || destinations.length === 0) fail("search_anywhere: results without destinations", result);
       for (let d = 1; d < destinations.length; d++) {
@@ -164,7 +171,20 @@ async function main(): Promise<void> {
       continue;
     }
 
-    assertShortlistShape(record, passengers, (parsed.data as { cabin?: string }).cabin, toolName);
+    if ((record as { trip?: string }).trip === "round-trip") {
+      const outbound = (record as { outbound: Record<string, unknown> }).outbound;
+      const returnLeg = (record as { return: Record<string, unknown> }).return;
+      assertShortlistShape(outbound, passengers, (parsed.data as { cabin?: string }).cabin, "round-trip outbound");
+      assertShortlistShape(returnLeg, passengers, (parsed.data as { cabin?: string }).cabin, "round-trip return");
+      const totalFrom = (record as { total_from: { price_per_person: number; price_total: number } }).total_from;
+      const cheapestOut = (outbound.shortlist as { cheapest: Offer }).cheapest.price_per_person;
+      const cheapestRet = (returnLeg.shortlist as { cheapest: Offer }).cheapest.price_per_person;
+      if (Math.abs(totalFrom.price_per_person - (cheapestOut + cheapestRet)) > 0.01) {
+        fail("round-trip: total_from != cheapest outbound + cheapest return", totalFrom);
+      }
+    } else {
+      assertShortlistShape(record, passengers, (parsed.data as { cabin?: string }).cabin, toolName);
+    }
 
     if (toolName === "search_flexible_dates") {
       const days = record.days as { date: string; min_price_per_person: number }[];
@@ -182,6 +202,35 @@ async function main(): Promise<void> {
       const cheapestDay = record.cheapest_day as { date: string; min_price_per_person: number };
       const minDay = days.reduce((a, b) => (a.min_price_per_person <= b.min_price_per_person ? a : b));
       if (cheapestDay.date !== minDay.date) fail("search_flexible_dates: cheapest_day is not the minimum", { cheapestDay, minDay });
+    }
+
+    if (rng() < 0.2) {
+      cases++;
+      const fareDef = byName.get("get_fare_details")!;
+      const shortlist = (record as { shortlist?: Record<string, Offer> }).shortlist
+        ?? (record as { outbound?: { shortlist: Record<string, Offer> } }).outbound?.shortlist;
+      const flightId = shortlist?.best?.flight_id;
+      if (flightId === undefined) fail("get_fare_details: no offer from search to inspect", result);
+      const fareArgs = { flight_id: flightId, cabin: (parsed.data as { cabin?: "economy" | "business" }).cabin ?? "economy" };
+      const fareParsed = fareDef.schema.safeParse(fareArgs);
+      if (!fareParsed.success) fail("get_fare_details: generated args rejected", fareArgs);
+      let fareResult: unknown;
+      try {
+        fareResult = await fareDef.run(fareParsed.data, ctx);
+      } catch (err) {
+        fail("get_fare_details.run threw on valid args", err instanceof Error ? err.message : err);
+      }
+      const fareRecord = fareResult as Record<string, unknown>;
+      if (fareRecord.error !== undefined) fail("get_fare_details: error for a known flight_id", fareResult);
+      const seat = fareRecord.cheapest_available_seat as Record<string, unknown> | undefined;
+      if (seat !== undefined) {
+        if (!["basic", "standard", "flex"].includes(String(seat.fare_brand))) {
+          fail("get_fare_details: unknown fare brand", seat);
+        }
+        if (typeof seat.carry_on_included !== "boolean" || typeof seat.refundable !== "boolean") {
+          fail("get_fare_details: fare rules missing", seat);
+        }
+      }
     }
 
     if (rng() < 0.5) {

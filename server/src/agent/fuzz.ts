@@ -67,7 +67,7 @@ function randomJson(depth: number): Json {
 }
 
 function randomArgObject(depth: number): { [key: string]: Json } {
-  const keys = ["origin", "destination", "date", "from_date", "days", "passengers", "cabin", "max_price", "depart_after", "depart_before", "sort", "query", "extra", "__proto__", "constructor", "toString"];
+  const keys = ["origin", "destination", "date", "from_date", "return_date", "days", "passengers", "cabin", "max_price", "depart_after", "depart_before", "sort", "query", "theme", "flight_id", "extra", "__proto__", "constructor", "toString"];
   const obj: { [key: string]: Json } = {};
   for (let i = 0; i < randInt(0, 5); i++) {
     Object.defineProperty(obj, pick(keys), {
@@ -155,8 +155,18 @@ for (let i = 0; i < ITERATIONS; i++) {
     currency: "EUR",
     passengers: 1,
     cabin: pick(["economy", "business"] as const),
+    airline_code: "FF",
+    airline_name: "FlyFast",
+    fare_brand: pick(["basic", "standard", "flex"] as const),
+    carry_on: rng() < 0.5,
+    checked_bags: randInt(0, 2),
+    refundable: rng() < 0.5,
+    changeable: rng() < 0.5,
+    change_fee: randInt(0, 60),
+    on_time_pct: randInt(80, 99),
     seats_available: randInt(0, 72),
     window_available: rng() < 0.5,
+    expires_at: "2026-12-01T23:59:00.000Z",
   }));
   const argsRaw = randomArgObject(2);
   const parsed = filterDef.schema.safeParse(argsRaw);
@@ -219,8 +229,18 @@ for (let i = 0; i < ITERATIONS; i++) {
     currency: "EUR",
     passengers: 1,
     cabin: "economy",
+    airline_code: "FF",
+    airline_name: "FlyFast",
+    fare_brand: pick(["basic", "standard", "flex"] as const),
+    carry_on: rng() < 0.5,
+    checked_bags: randInt(0, 2),
+    refundable: rng() < 0.5,
+    changeable: rng() < 0.5,
+    change_fee: randInt(0, 60),
+    on_time_pct: randInt(80, 99),
     seats_available: randInt(0, 72),
     window_available: rng() < 0.5,
+    expires_at: "2026-12-01T23:59:00.000Z",
   }));
   const ranked = rankOffers(offers);
   if (count === 0) {

@@ -1,3 +1,5 @@
+export type FareBrand = "basic" | "standard" | "flex";
+
 export interface Offer {
   flight_id: string;
   flight_no: string;
@@ -14,8 +16,23 @@ export interface Offer {
   currency: string;
   passengers: number;
   cabin: "economy" | "business";
+  airline_code: string;
+  airline_name: string;
+  fare_brand: FareBrand;
+  carry_on: boolean;
+  checked_bags: number;
+  refundable: boolean;
+  changeable: boolean;
+  change_fee: number;
+  on_time_pct: number;
   seats_available: number;
   window_available: boolean;
+  expires_at: string;
+}
+
+export interface UpgradePick {
+  offer: Offer;
+  delta_per_person: number;
 }
 
 export interface Shortlist {
@@ -27,6 +44,10 @@ export interface Shortlist {
 function departurePenalty(offer: Offer): number {
   const hour = Number(offer.departs_at.slice(0, 2));
   return hour < 6 || hour >= 23 ? 0.5 : 0;
+}
+
+function reliabilityPenalty(offer: Offer): number {
+  return (100 - offer.on_time_pct) / 100;
 }
 
 export function rankOffers(offers: Offer[]): Shortlist | null {
@@ -45,11 +66,13 @@ export function rankOffers(offers: Offer[]): Shortlist | null {
     const scoreA =
       (a.price_total - minPrice) / priceSpan +
       (a.duration_minutes - minDuration) / durationSpan +
-      departurePenalty(a);
+      departurePenalty(a) +
+      reliabilityPenalty(a);
     const scoreB =
       (b.price_total - minPrice) / priceSpan +
       (b.duration_minutes - minDuration) / durationSpan +
-      departurePenalty(b);
+      departurePenalty(b) +
+      reliabilityPenalty(b);
     if (scoreA !== scoreB) return scoreA - scoreB;
     if (a.price_total !== b.price_total) return a.price_total - b.price_total;
     return a.departs_at.localeCompare(b.departs_at);

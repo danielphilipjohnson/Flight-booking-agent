@@ -40,8 +40,18 @@ function offer(partial: Partial<Offer>): Offer {
     currency: "EUR",
     passengers: 1,
     cabin: "economy",
+    airline_code: "FF",
+    airline_name: "FlyFast",
+    fare_brand: "standard",
+    carry_on: true,
+    checked_bags: 1,
+    refundable: false,
+    changeable: true,
+    change_fee: 25,
+    on_time_pct: 95,
     seats_available: 10,
     window_available: true,
+    expires_at: "2026-12-01T23:59:00.000Z",
     ...partial,
   };
 }
@@ -79,15 +89,28 @@ ok(ranked.best.flight_no !== "EARLY", "4am departure is penalized unless much ch
 const single = rankOffers([cheapSlow])!;
 ok(single.best === cheapSlow && single.cheapest === cheapSlow && single.fastest === cheapSlow, "single offer wins all slots");
 
+const reliable = offer({ flight_no: "SAFE", price_total: 100, duration_minutes: 150, departs_at: "14:00", on_time_pct: 96 });
+const unreliable = offer({ flight_no: "LATE", price_total: 100, duration_minutes: 150, departs_at: "14:00", on_time_pct: 87 });
+const reliabilityRanked = rankOffers([unreliable, reliable])!;
+ok(reliabilityRanked.best.flight_no === "SAFE", "equal price/duration: higher on-time pct wins");
+const lateButCheap = offer({ flight_no: "LATECHEAP", price_total: 70, duration_minutes: 150, departs_at: "14:00", on_time_pct: 80 });
+ok(rankOffers([lateButCheap, reliable])!.best.flight_no === "LATECHEAP", "reliability does not outweigh a much cheaper fare");
+
 section("tool schemas");
 const tools = buildToolDefs();
 const byName = new Map(tools.map((t) => [t.name, t]));
-ok(tools.length === 5, "five read tools defined");
+ok(tools.length === 7, "seven read tools defined");
 ok(
-  ["resolve_airport_code", "search_flight_offers", "search_flexible_dates", "search_anywhere", "filter_offers"].every(
-    (n) => byName.has(n),
-  ),
-  "tool names match the phase plan",
+  [
+    "resolve_airport_code",
+    "search_flight_offers",
+    "search_flexible_dates",
+    "search_anywhere",
+    "search_inspiration",
+    "filter_offers",
+    "get_fare_details",
+  ].every((n) => byName.has(n)),
+  "tool names cover the funnel-top feature set",
 );
 
 const search = byName.get("search_flight_offers")!.schema;
@@ -99,6 +122,27 @@ if (searchArgs.success) {
 ok(!search.safeParse({ origin: "LHR", destination: "LIS", date: "tomorrow" }).success, "fuzzy date rejected at schema level");
 ok(!search.safeParse({ origin: "LHR", destination: "LIS", date: "2026-12-01", passengers: 0 }).success, "zero passengers rejected");
 ok(!search.safeParse({ origin: "LHR", destination: "LIS", date: "2026-12-01", cabin: "first" }).success, "unknown cabin rejected");
+
+const roundTrip = search.safeParse({
+  origin: "London",
+  destination: "Lisbon",
+  date: "2026-12-01",
+  return_date: "2026-12-08",
+});
+ok(roundTrip.success, "round-trip return_date accepted");
+ok(!search.safeParse({ origin: "LHR", destination: "LIS", date: "2026-12-01", return_date: "soon" }).success, "fuzzy return_date rejected");
+
+const fare = byName.get("get_fare_details")!.schema;
+ok(!fare.safeParse({ flight_id: "not-a-uuid" }).success, "get_fare_details rejects non-uuid offer ids");
+ok(fare.safeParse({ flight_id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8" }).success, "get_fare_details accepts a uuid");
+
+const inspiration = byName.get("search_inspiration")!.schema;
+ok(!inspiration.safeParse({ origin: "LHR" }).success, "search_inspiration requires a theme");
+const inspirationArgs = inspiration.safeParse({ origin: "LHR", theme: "warm" });
+ok(inspirationArgs.success, "search_inspiration accepts theme synonyms");
+if (inspirationArgs.success) {
+  ok(inspirationArgs.data.days === 14, "search_inspiration defaults to the full window");
+}
 
 const filter = byName.get("filter_offers")!.schema;
 ok(!filter.safeParse({ depart_after: "25:00" }).success, "invalid departure time rejected");
