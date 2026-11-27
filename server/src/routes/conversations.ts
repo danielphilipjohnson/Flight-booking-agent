@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { pool } from "../db/postgres.ts";
+import { pgQueryable } from "../db/postgres.ts";
+import { getDisplayName } from "../db/queries/users.ts";
 import { sessions } from "../db/mongo.ts";
 import { summarizeConversation } from "../db/conversations.ts";
 
@@ -30,11 +31,8 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: "user_ref is required" });
     }
     const { user_ref } = parsed.data;
-    const { rows } = await pool.query(
-      "SELECT display_name FROM app_user WHERE user_ref = $1",
-      [user_ref],
-    );
-    if (rows.length === 0) {
+    const displayName = await getDisplayName(pgQueryable, user_ref);
+    if (displayName === null) {
       return reply.code(404).send({ error: "unknown user" });
     }
     const sessionId = randomUUID();
@@ -42,7 +40,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     await sessions().insertOne({
       _id: sessionId,
       user_ref,
-      display_name: String(rows[0]!.display_name),
+      display_name: displayName,
       created_at: now,
       updated_at: now,
       title: "",
@@ -51,7 +49,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
     return {
       sessionId,
       user_ref,
-      display_name: String(rows[0]!.display_name),
+      display_name: displayName,
       title: "New conversation",
       created_at: now.toISOString(),
       updated_at: now.toISOString(),
