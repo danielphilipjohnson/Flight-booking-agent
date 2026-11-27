@@ -132,5 +132,4 @@ export function toOllamaMessages(
     messages.push(message);
   }
   return messages;
-
 }
