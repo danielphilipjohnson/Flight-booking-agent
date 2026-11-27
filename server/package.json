@@ -9,6 +9,10 @@
     "seed": "tsx src/seed/seed.ts",
     "seed:check": "tsx src/seed/seed.ts --check",
     "harness": "tsx src/seed/harness.ts",
+    "harness:agent": "tsx src/agent/agent-harness.ts",
+    "fuzz": "tsx src/agent/fuzz.ts",
+    "fuzz:live": "tsx src/agent/fuzz-live.ts",
+    "fuzz:agent": "tsx src/agent/fuzz-agent.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

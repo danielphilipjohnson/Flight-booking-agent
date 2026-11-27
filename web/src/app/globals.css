@@ -12,3 +12,105 @@ body {
   background: #0b0f17;
   color: #e6e9ef;
 }
+
+main.gate,
+main.chat {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 100vh;
+}
+
+main.gate label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-width: 280px;
+}
+
+select,
+input,
+button {
+  background: #131a26;
+  color: #e6e9ef;
+  border: 1px solid #2a3547;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  align-self: flex-start;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.error {
+  color: #ff8a8a;
+}
+
+main.chat header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #8b93a5;
+  font-size: 0.875rem;
+}
+
+.entries {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  overflow-y: auto;
+}
+
+.bubble {
+  padding: 0.6rem 0.9rem;
+  border-radius: 12px;
+  max-width: 85%;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: #1d4ed8;
+}
+
+.bubble.assistant {
+  align-self: flex-start;
+  background: #131a26;
+  border: 1px solid #2a3547;
+}
+
+.chip {
+  align-self: flex-start;
+  font-size: 0.8rem;
+  color: #8b93a5;
+  background: #0f1622;
+  border: 1px solid #2a3547;
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+}
+
+.chip code {
+  color: #7dd3fc;
+  margin-right: 0.4rem;
+}
+
+main.chat footer {
+  display: flex;
+  gap: 0.5rem;
+}
+
+main.chat footer input {
+  flex: 1;
+}

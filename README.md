@@ -27,6 +27,9 @@ user (browser) --> Next.js chat UI --> POST /api/chat (SSE) --> Fastify agent AP
 | Chat history | MongoDB | One document per session, `$push` appends |
 | Infra | Docker Compose | `postgres` + `mongo` + `ollama`, one command up |
 
+For how the search agent behaves and how conversations are designed to flow,
+see [docs/flight-search-agent.md](docs/flight-search-agent.md).
+
 ## Repo layout
 
 ```
@@ -40,12 +43,14 @@ user (browser) --> Next.js chat UI --> POST /api/chat (SSE) --> Fastify agent AP
 │       │   ├── postgres.ts # pg Pool + transaction helper
 │       │   ├── mongo.ts    # session + message persistence
 │       │   └── schema.sql  # tables, constraints, ownership scoping
-│       ├── routes/         # /api/health (chat routes land in Phase 2)
+│       ├── routes/         # /api/health, /api/auth/verify, /api/chat, /api/chat/stream,
+│       │   │           # /api/sessions/:id
+│       ├── agent/         # agent loop, read tools, shortlist ranking, history (Phase 2)
 │       └── seed/
 │           ├── generate.ts # deterministic dataset generator (mulberry32 + name-based UUIDs)
 │           ├── seed.ts     # CLI: --check preview, or TRUNCATE + insert into Postgres
 │           └── harness.ts  # invariant assertions + sqlite constraint simulation
-└── web/                    # Next.js chat UI
+├── web/                    # Next.js chat UI (mock-user sign-in, SSE, tool chips)
     └── src/app/
 ```
 
@@ -58,13 +63,19 @@ cp .env.example .env
 npm install
 npm run seed:check   # preview the dataset, no DB write
 npm run seed         # flights + mock users (schema auto-applies on first compose boot)
+npm run fuzz:live    # optional: fuzzer against live Postgres (after seed)
+npm run fuzz:agent   # optional: fuzzer through Ollama + full stack
 npm run dev:server   # Fastify agent API on :3001
 npm run dev:web      # Next chat UI on :3000
 ```
 
-`npm test` runs the seed harness (no database needed): structural invariants of
-the generated dataset plus a `node:sqlite` simulation of `schema.sql` proving the
-constraints reject bad rows (unknown IATA, inverted times, double-claimed seat).
+`npm test` runs three no-database suites: the seed harness (structural
+invariants of the generated dataset plus a `node:sqlite` simulation of
+`schema.sql` proving the constraints reject bad rows), the agent harness
+(airport resolution, date windows, shortlist ranking, tool schemas,
+`filter_offers` ordering), and a deterministic fuzzer (seed=42, 3000 randomized
+cases) asserting the tool schemas, ranking, resolver and message-normalization
+layers never throw or violate their invariants on junk input.
 
 ## Design decisions that carry the portfolio story
 
@@ -110,7 +121,9 @@ constraints reject bad rows (unknown IATA, inverted times, double-claimed seat).
 | Method + path | Purpose |
 | --- | --- |
 | `GET /api/health` | 200 when Postgres + Mongo reachable |
+| `POST /api/auth/verify` | Mock sign-in: user_ref + PIN against `app_user` |
 | `POST /api/chat` | Body: session/user ref + message; runs agent loop (Phase 2) |
 | `POST /api/chat/stream` | SSE twin: typing / token / tool / confirm / done / error events |
 | `GET /api/sessions/:id` | History from Mongo, per-user scoped |
+| `DELETE /api/chat/:sessionId` | Release pinned offers for a session |
 | `POST /api/tools/:name/confirm` | Confirm-before-write gate for hold/create/cancel |
