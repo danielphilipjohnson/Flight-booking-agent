@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { sessions } from "../db/mongo.ts";
-import { verifyCredentials } from "../db/users.ts";
+import { pgQueryable } from "../db/postgres.ts";
+import { findUserByCredentials } from "../db/queries/users.ts";
 
 export async function sessionRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/sessions/:id", async (request, reply) => {
@@ -9,8 +10,8 @@ export async function sessionRoutes(app: FastifyInstance): Promise<void> {
     if (!query.user_ref || !query.pin) {
       return reply.code(400).send({ error: "user_ref and pin query parameters are required" });
     }
-    const displayName = await verifyCredentials(query.user_ref, query.pin);
-    if (!displayName) return reply.code(401).send({ error: "Unknown user or wrong PIN" });
+    const user = await findUserByCredentials(pgQueryable, query.user_ref, query.pin);
+    if (!user) return reply.code(401).send({ error: "Unknown user or wrong PIN" });
 
     const doc = await sessions().findOne({ _id: id, user_ref: query.user_ref });
     if (!doc) return reply.code(404).send({ error: "Session not found" });
