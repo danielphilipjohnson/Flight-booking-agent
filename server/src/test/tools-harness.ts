@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { FIXED_NOW, loadSchemaSql, seededQueryable, sqliteDb, toQueryable } from "./fixtures.ts";
 import { generateDataset, uuidFor } from "../seed/generate.ts";
-import { createFlightTools, releaseExpiredHolds } from "../tools/flights.ts";
+import { createFlightTools, pinnedOfferCount, releaseExpiredHolds } from "../tools/flights.ts";
 import {
   findFirstAvailableFlightInput,
   searchFlightsInput,
@@ -31,9 +31,42 @@ ok(
 );
 const citySearch = (await byName("search_flights").run({ origin: "London", destination: "Lisbon", date: tomorrow } as never, ctx)) as typeof search;
 ok(citySearch.results.length === 3 && citySearch.results.every((r) => r.flight_no.startsWith("FF1")), "city names resolve via airport table (London -> LHR route)");
-const noRoute = (await byName("search_flights").run({ origin: "LHR", destination: "Tokyo", date: tomorrow } as never, ctx)) as typeof search;
+const noRoute = (await byName("search_flights").run({ origin: "LHR", destination: "Tokyo", date: tomorrow } as never, ctx)) as typeof search & {
+  resolved: { origin: string[]; destination: string[] };
+  note: string;
+};
 ok(noRoute.results.length === 0, "unknown destination -> graceful empty results");
+ok(noRoute.resolved.origin.includes("LHR") && noRoute.resolved.destination.length === 0, "empty result carries resolved codes so the model can tell unknown place from no service");
+ok(noRoute.note.includes("Tokyo"), "unresolved place reports which place matched nothing");
 ok(!searchFlightsInput.safeParse({ origin: "LHR", destination: "LIS", date: "tomorrow" }).success, "Zod rejects non-ISO dates");
+
+console.log("\n# round trips + pinned legs");
+const sessionCtx = { userRef: "ava", sessionId: "harness-session" };
+const day2 = "2026-11-22";
+const roundTrip = (await byName("search_flights").run({ origin: "LHR", destination: "LIS", date: tomorrow, return_date: day2 } as never, sessionCtx)) as typeof search & {
+  return_results: typeof search.results;
+  round_trip_total_from: number;
+};
+ok(roundTrip.results.length === 3 && roundTrip.return_results.length === 3, "round trip returns both legs");
+ok(pinnedOfferCount("harness-session") === 6, "round trip pins both legs");
+const filterDef = byName("filter_offers");
+const returnLeg = (await filterDef.run({ leg: "return", sort: "cheapest" } as never, sessionCtx)) as {
+  results: { flight_id: string; leg: string }[];
+  filters: { leg: string };
+};
+ok(returnLeg.results.every((r) => roundTrip.return_results.some((ret) => ret.flight_id === r.flight_id)), "filter_offers leg:return only sees return-leg pins");
+ok(returnLeg.results.every((r) => r.leg === "return") && returnLeg.filters.leg === "return", "filtered return results are tagged leg:return");
+const outboundLeg = (await filterDef.run({ sort: "fastest" } as never, sessionCtx)) as typeof returnLeg;
+ok(outboundLeg.results.every((r) => roundTrip.results.some((out) => out.flight_id === r.flight_id)), "filter_offers defaults to the outbound leg");
+const emptySearch = (await byName("search_flights").run({ origin: "LHR", destination: "LIS", date: "2026-12-15" } as never, sessionCtx)) as typeof search & {
+  resolved: { origin: string[]; destination: string[] };
+  note?: string;
+};
+ok(emptySearch.results.length === 0 && emptySearch.resolved.origin.length > 0, "no service that date -> empty results with resolved codes");
+ok(emptySearch.note === undefined, "resolved route without service gets no unknown-place note");
+ok(pinnedOfferCount("harness-session") === 0, "empty search clears the stale pin");
+const afterClear = (await filterDef.run({} as never, sessionCtx)) as { error?: string };
+ok(afterClear.error !== undefined, "filter_offers after an empty search reports no recent search");
 
 console.log("\n# find_first_available_flight");
 const first = (await byName("find_first_available_flight").run(

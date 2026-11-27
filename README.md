@@ -174,14 +174,14 @@ Agent errors and warnings are appended as JSON lines to `logs/agent-errors.log`
 
 | Tool | Args | Returns |
 | --- | --- | --- |
-| `search_flights` | `origin`, `destination` (IATA or city), `date` (ISO), `return_date?` | Results with airports, times, duration, `base_price`, `on_time_pct`; round trips add `return_results` + `round_trip_total_from` (or `empty_leg`) |
+| `search_flights` | `origin`, `destination` (IATA or city), `date` (ISO), `return_date?` | Results with airports, times, duration, `base_price`, `on_time_pct`; round trips add `return_results` + `round_trip_total_from` (or `empty_leg`); empty results carry `resolved` codes (+ `note` when a place matched no airport) |
 | `find_first_available_flight` | `month?` (`YYYY-MM`) or `from_date`/`to_date`, `origin?`/`destination?` (omit both for every route), `class?` | First flight in the range with an available seat, plus times, base price, on-time pct, seat count, min price, and sample seats |
 | `get_flight_details` | `flight_id` | airline, on-time pct, times, base price, `seat_summary` per class/status, per-class `fare_rules` (brand, bags, refundability, change fee) |
 | `list_available_seats` | `flight_id`, `class?` | `{ available_seats: [{ seat_no, class, fare_brand, price }] }` |
 | `search_flexible_prices` | `origin`, `destination`, `from_date`, `days?` (≤14), `class?` | Per-day cheapest prices + `cheapest_day` |
 | `search_anywhere` | `origin`, `from_date?`, `days?`, `max_price?` | Up to 10 destinations, cheapest-economy order |
 | `search_inspiration` | `origin`, `theme`, `from_date?`, `days?`, `max_price?` | Theme-matched destinations, price-ranked |
-| `filter_offers` | `max_price?`, `depart_after?`, `depart_before?`, `sort?` | Filtered + re-sorted last search, no re-query |
+| `filter_offers` | `max_price?`, `depart_after?`, `depart_before?`, `sort?`, `leg?` | Filtered + re-sorted last search (leg targets a round-trip leg, default outbound), no re-query |
 | `list_my_bookings` | — (session identity injected) | `{ bookings: [...] }`, cancelled excluded by SQL |
 
 Write tools (`hold_seat`, `create_booking`, `cancel_booking`) are confirm-gated: the

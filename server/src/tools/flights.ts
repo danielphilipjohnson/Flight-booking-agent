@@ -167,6 +167,8 @@ async function seatAggregatesByFlight(
   return map;
 }
 
+export type PinnedLeg = "outbound" | "return";
+
 export interface PinnedOffer {
   flight_id: string;
   flight_no: string;
@@ -176,6 +178,7 @@ export interface PinnedOffer {
   arrives_at: string;
   base_price: number;
   on_time_pct: number;
+  leg?: PinnedLeg;
 }
 
 const pinnedBySession = new Map<string, PinnedOffer[]>();
@@ -199,7 +202,7 @@ export function clearPinnedOffers(sessionId: string): void {
   pinnedBySession.delete(sessionId);
 }
 
-function toPinned(rows: FlightRow[]): PinnedOffer[] {
+function toPinned(rows: FlightRow[], leg: PinnedLeg = "outbound"): PinnedOffer[] {
   return rows.map((r) => ({
     flight_id: String(r.id),
     flight_no: String(r.flight_no),
@@ -209,6 +212,7 @@ function toPinned(rows: FlightRow[]): PinnedOffer[] {
     arrives_at: iso(r.arrives_at),
     base_price: Number(r.base_price),
     on_time_pct: Number(r.on_time_pct ?? 95),
+    leg,
   }));
 }
 
@@ -236,7 +240,17 @@ export function createFlightTools(db: Queryable): ToolDef[] {
       const originCodes = await resolveCodes(db, origin);
       const destinationCodes = await resolveCodes(db, destination);
       if (originCodes.length === 0 || destinationCodes.length === 0) {
-        return { results: [], return_results: return_date ? [] : undefined };
+        if (ctx.sessionId) clearPinnedOffers(ctx.sessionId);
+        const unresolved = [
+          ...(originCodes.length === 0 ? [`origin "${origin}"`] : []),
+          ...(destinationCodes.length === 0 ? [`destination "${destination}"`] : []),
+        ].join(" and ");
+        return {
+          results: [],
+          resolved: { origin: originCodes, destination: destinationCodes },
+          note: `No airports match the ${unresolved}. Say the place isn't in the network, or call resolve_airport_code to list what is.`,
+          return_results: return_date ? [] : undefined,
+        };
       }
       const outbound = (await flightsBetween(db, originCodes, destinationCodes)).filter(
         (r) => utcDay(r.departs_at) === date,
@@ -244,7 +258,10 @@ export function createFlightTools(db: Queryable): ToolDef[] {
       outbound.sort((a, b) => iso(a.departs_at).localeCompare(iso(b.departs_at)));
 
       if (!return_date) {
-        if (outbound.length === 0) return { results: [] };
+        if (outbound.length === 0) {
+          if (ctx.sessionId) clearPinnedOffers(ctx.sessionId);
+          return { results: [], resolved: { origin: originCodes, destination: destinationCodes } };
+        }
         if (ctx.sessionId) setPinnedOffers(ctx.sessionId, toPinned(outbound));
         return {
           results: outbound.map((r) => ({
@@ -266,13 +283,15 @@ export function createFlightTools(db: Queryable): ToolDef[] {
       );
       returnRows.sort((a, b) => iso(a.departs_at).localeCompare(iso(b.departs_at)));
       if (outbound.length === 0 || returnRows.length === 0) {
+        if (ctx.sessionId) clearPinnedOffers(ctx.sessionId);
         return {
           results: outbound.map((r) => ({ flight_id: r.id, flight_no: r.flight_no, departs_at: iso(r.departs_at) })),
           return_results: returnRows.map((r) => ({ flight_id: r.id, flight_no: r.flight_no, departs_at: iso(r.departs_at) })),
           empty_leg: outbound.length === 0 ? "outbound" : "return",
+          resolved: { origin: originCodes, destination: destinationCodes },
         };
       }
-      if (ctx.sessionId) setPinnedOffers(ctx.sessionId, toPinned(outbound));
+      if (ctx.sessionId) setPinnedOffers(ctx.sessionId, [...toPinned(outbound, "outbound"), ...toPinned(returnRows, "return")]);
       const cheapestOut = Math.min(...outbound.map((r) => Number(r.base_price)));
       const cheapestRet = Math.min(...returnRows.map((r) => Number(r.base_price)));
       return {
@@ -772,10 +791,10 @@ export function createFlightTools(db: Queryable): ToolDef[] {
   const filterOffers: ToolDef = {
     name: "filter_offers",
     description:
-      "Narrow the results of the last search_flights call in this conversation without re-querying: filter by per-person price ceiling and departure time window, and re-sort. Use for 'cheaper', 'not before noon', 'show fastest first'.",
+      "Narrow the results of the last search_flights call in this conversation without re-querying: filter by per-person price ceiling and departure time window, and re-sort. Use for 'cheaper', 'not before noon', 'show fastest first'. After a round-trip search, pass leg: 'return' to refine the return leg (default filters the outbound leg).",
     schema: filterOffersInput,
     run: async (args, ctx) => {
-      const { max_price, depart_after, depart_before, sort } = filterOffersInput.parse(args) as FilterOffersArgs;
+      const { max_price, depart_after, depart_before, sort, leg: legFilter } = filterOffersInput.parse(args) as FilterOffersArgs;
       if (!ctx.sessionId) {
         return { error: "filter_offers needs a session; run search_flights first." };
       }
@@ -783,7 +802,17 @@ export function createFlightTools(db: Queryable): ToolDef[] {
       if (!pinned || pinned.length === 0) {
         return { error: "No recent search to filter in this conversation. Run search_flights first." };
       }
-      const filtered = pinned.filter((offer) => {
+      const leg: PinnedLeg = legFilter ?? "outbound";
+      const legPool = pinned.filter((offer) => (offer.leg ?? "outbound") === leg);
+      const filters = { max_price: max_price ?? null, depart_after: depart_after ?? null, depart_before: depart_before ?? null, sort: sort ?? "best", leg };
+      if (legPool.length === 0) {
+        return {
+          results: [],
+          filters,
+          note: leg === "return" ? "The last search has no return leg. Run search_flights with return_date first." : "Nothing matches these filters. Suggest relaxing one of them or searching different dates.",
+        };
+      }
+      const filtered = legPool.filter((offer) => {
         if (max_price !== undefined && offer.base_price > max_price) return false;
         const time = offer.departs_at.slice(11, 16);
         if (depart_after !== undefined && time < depart_after) return false;
@@ -793,7 +822,7 @@ export function createFlightTools(db: Queryable): ToolDef[] {
       if (filtered.length === 0) {
         return {
           results: [],
-          filters: { max_price: max_price ?? null, depart_after: depart_after ?? null, depart_before: depart_before ?? null },
+          filters,
           note: "Nothing matches these filters. Suggest relaxing one of them or searching different dates.",
         };
       }
@@ -815,6 +844,7 @@ export function createFlightTools(db: Queryable): ToolDef[] {
         results: sorted.map((offer) => ({
           flight_id: offer.flight_id,
           flight_no: offer.flight_no,
+          leg: offer.leg ?? "outbound",
           origin: offer.origin,
           destination: offer.destination,
           departs_at: offer.departs_at,
@@ -823,7 +853,7 @@ export function createFlightTools(db: Queryable): ToolDef[] {
           base_price: offer.base_price,
           on_time_pct: offer.on_time_pct,
         })),
-        filters: { max_price: max_price ?? null, depart_after: depart_after ?? null, depart_before: depart_before ?? null, sort: sort ?? "best" },
+        filters,
       };
     },
     toOllamaSchema: () =>
@@ -837,6 +867,7 @@ export function createFlightTools(db: Queryable): ToolDef[] {
             depart_after: { type: "string", pattern: "^\\d{2}:\\d{2}$", description: "Earliest departure, HH:MM UTC" },
             depart_before: { type: "string", pattern: "^\\d{2}:\\d{2}$", description: "Latest departure, HH:MM UTC" },
             sort: { type: "string", enum: ["best", "cheapest", "fastest"] },
+            leg: { type: "string", enum: ["outbound", "return"], description: "Which leg of a round-trip search to filter; default outbound" },
           },
           required: [],
         },
