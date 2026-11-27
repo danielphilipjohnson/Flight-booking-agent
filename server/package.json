@@ -8,11 +8,10 @@
     "start": "tsx src/index.ts",
     "seed": "tsx src/seed/seed.ts",
     "seed:check": "tsx src/seed/seed.ts --check",
-    "harness": "tsx src/seed/harness.ts",
-    "harness:agent": "tsx src/agent/agent-harness.ts",
-    "fuzz": "tsx src/agent/fuzz.ts",
-    "fuzz:live": "tsx src/agent/fuzz-live.ts",
-    "fuzz:agent": "tsx src/agent/fuzz-agent.ts",
+    "harness": "tsx src/seed/harness.ts && tsx src/test/tools-harness.ts && tsx src/test/prompt-harness.ts && tsx src/test/loop-harness.ts && tsx src/test/booking-harness.ts && tsx src/test/context-harness.ts && tsx src/test/eval-harness.ts && tsx src/test/sse-harness.ts && tsx src/test/proposal-harness.ts && tsx src/test/conversations-harness.ts && tsx src/test/error-log-harness.ts && tsx src/test/unit-harness.ts",
+    "fuzz": "tsx src/test/fuzz.ts",
+    "fuzz:live": "tsx src/test/fuzz-live.ts",
+    "fuzz:agent": "tsx src/test/fuzz-agent.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

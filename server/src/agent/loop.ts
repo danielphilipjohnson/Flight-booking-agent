@@ -1,117 +1,271 @@
+import { assembleChat, type ChatChunk, type OllamaClient, type OllamaMessage } from "./ollama.ts";
+import { selectContext, type ContextOptions } from "./context.ts";
+import { toOllamaMessages } from "./prompt.ts";
+import type { ToolContext, ToolDef } from "../tools/schemas.ts";
 import type { StoredMessage } from "../db/mongo.ts";
-import { verifyCredentials } from "../db/users.ts";
-import { appendMessages, ensureSession, loadHistory } from "./history.ts";
-import {
-  normalizeToolCalls,
-  ollamaChat,
-  stripThinking,
-  type OllamaMessage,
-  type OllamaTool,
-} from "./ollama.ts";
-import { buildSystemPrompt } from "./prompt.ts";
-import { buildToolDefs, type ToolContext } from "./tools.ts";
 
-const MAX_TOOL_ROUNDS = 8;
-
-export type AgentEvent =
-  | { type: "tool"; name: string; summary: string }
-  | { type: "message"; content: string };
-
-export interface AgentOptions {
-  sessionId: string;
-  userRef: string;
-  pin: string;
-  message: string;
-  now?: Date;
+export interface ToolTraceEntry {
+  name: string;
+  status: "ok" | "error" | "pending_confirmation";
+  summary: string;
 }
 
-function summarize(name: string, args: Record<string, unknown>): string {
-  const parts: string[] = [];
-  for (const key of ["origin", "destination", "date", "from_date", "query", "max_price", "sort"]) {
-    const value = args[key];
-    if (value !== undefined) parts.push(`${key}: ${String(value)}`);
+export interface PendingConfirmation {
+  tool: string;
+  args: Record<string, unknown>;
+  id?: string;
+}
+
+export interface LoopResult {
+  reply: string;
+  toolTrace: ToolTraceEntry[];
+  pendingConfirmation: PendingConfirmation | null;
+  iterations: number;
+  evalCount: number;
+  promptEvalCount: number;
+  compacted: boolean;
+}
+
+export type LoopEvent =
+  | { type: "typing" }
+  | { type: "token"; text: string }
+  | { type: "tool"; name: string; status: ToolTraceEntry["status"]; summary: string }
+  | { type: "confirm"; pending: PendingConfirmation }
+  | {
+      type: "done";
+      reply: string;
+      toolTrace: ToolTraceEntry[];
+      pendingConfirmation: PendingConfirmation | null;
+      iterations: number;
+      evalCount: number;
+      promptEvalCount: number;
+      compacted: boolean;
+    };
+
+export const DEFAULT_MAX_ITERATIONS = 8;
+
+function summarize(name: string, result: unknown): string {
+  if (result && typeof result === "object") {
+    const r = result as Record<string, unknown>;
+    if (typeof r.error === "string") return r.error;
+    if (Array.isArray(r.results)) return `${name}: ${r.results.length} results`;
+    if (Array.isArray(r.available_seats)) return `${name}: ${r.available_seats.length} seats`;
+    if (Array.isArray(r.bookings)) return `${name}: ${r.bookings.length} bookings`;
+    if (Array.isArray(r.seat_summary)) return `${name}: summary ok`;
   }
-  return parts.length > 0 ? `${name}(${parts.join(", ")})` : name;
+  return `${name}: done`;
 }
 
-function toHistoryMessage(role: "user" | "assistant", content: string): StoredMessage {
-  return { role, content, ts: new Date() };
-}
+export async function driveLoop(opts: {
+  client: OllamaClient;
+  model: string;
+  systemPrompt: string;
+  history: StoredMessage[];
+  userMessage: string;
+  tools: ToolDef[];
+  ctx: ToolContext;
+  maxIterations?: number;
+  context?: ContextOptions;
+  signal?: AbortSignal;
+  onEvent?: (event: LoopEvent) => void | Promise<void>;
+  /** Non-fatal diagnostics (e.g. a retry after an empty model response). */
+  onWarning?: (message: string) => void;
+  persist?: (messages: StoredMessage[]) => Promise<void>;
+  makeProposalId?: () => string;
+}): Promise<LoopResult> {
+  const {
+    client,
+    model,
+    systemPrompt,
+    history,
+    userMessage,
+    tools,
+    ctx,
+    maxIterations = DEFAULT_MAX_ITERATIONS,
+    context,
+    signal,
+    onEvent,
+    onWarning,
+    persist,
+    makeProposalId,
+  } = opts;
 
-export async function* runAgent(options: AgentOptions): AsyncGenerator<AgentEvent> {
-  const displayName = await verifyCredentials(options.userRef, options.pin);
-  if (!displayName) throw new Error("Unknown user or wrong PIN");
-  await ensureSession(options.sessionId, options.userRef);
-  const history = await loadHistory(options.sessionId, options.userRef);
-  const tools = buildToolDefs();
-  const toolContext: ToolContext = { sessionId: options.sessionId };
-  const ollamaTools: OllamaTool[] = tools.map((t) => ({
-    type: "function",
-    function: { name: t.name, description: t.description, parameters: t.parameters },
-  }));
+  let compacted = false;
+  let historyForModel = history;
+  if (context) {
+    const compact =
+      context.compact ??
+      (async (prompt: string) => {
+        const chunks: ChatChunk[] = [];
+        for await (const chunk of client.chat({
+          model,
+          messages: [{ role: "user", content: prompt }],
+        })) {
+          chunks.push(chunk);
+        }
+        return assembleChat(chunks).message.content;
+      });
+    const selection = await selectContext(history, { ...context, compact });
+    historyForModel = selection.messages;
+    compacted = selection.compacted;
+  }
 
   const messages: OllamaMessage[] = [
-    { role: "system", content: buildSystemPrompt(options.now ?? new Date()) },
-    ...history.map((m): OllamaMessage => ({
-      role: m.role === "user" ? "user" : "assistant",
-      content: m.content,
-    })),
-    { role: "user", content: options.message },
+    ...toOllamaMessages(historyForModel, systemPrompt),
+    { role: "user", content: userMessage },
   ];
+  const now = () => new Date();
+  if (persist) {
+    await persist([{ role: "user", content: userMessage, ts: now() }]);
+  }
 
-  let reply = "";
+  const toolTrace: ToolTraceEntry[] = [];
+  let pendingConfirmation: PendingConfirmation | null = null;
+  let evalCount = 0;
+  let promptEvalCount = 0;
+  let iterations = 0;
+  let emptyRetries = 0;
 
-  await appendMessages(options.sessionId, options.userRef, [toHistoryMessage("user", options.message)]);
-
-  for (let round = 0; round <= MAX_TOOL_ROUNDS; round++) {
-    const response = await ollamaChat(messages, ollamaTools);
-    const toolCalls = normalizeToolCalls(response);
-
-    if (toolCalls.length === 0 || round === MAX_TOOL_ROUNDS) {
-      reply = stripThinking(response.content);
-      if (!reply) {
-        reply =
-          toolCalls.length > 0
-            ? "I hit my step limit before finishing that search. Could you rephrase or narrow it down?"
-            : "I could not produce an answer. Could you rephrase that?";
+  for (let i = 0; i < maxIterations; i++) {
+    iterations = i + 1;
+    await onEvent?.({ type: "typing" });
+    const chunks: ChatChunk[] = [];
+    for await (const chunk of client.chat({
+      model,
+      messages,
+      tools: tools.map((t) => t.toOllamaSchema()),
+      ...(signal ? { signal } : {}),
+    })) {
+      chunks.push(chunk);
+      if (chunk.message?.content) {
+        await onEvent?.({ type: "token", text: chunk.message.content });
       }
-      break;
+    }
+    const {
+      message,
+      evalCount: evals,
+      promptEvalCount: promptEvals,
+      thinking,
+      doneReason,
+    } = assembleChat(chunks);
+    if (evals) evalCount = evals;
+    if (promptEvals) promptEvalCount = promptEvals;
+
+    if (message.tool_calls.length === 0) {
+      // A completion with neither content nor tool calls is not an answer.
+      // Thinking models can do this by finishing with only `thinking` tokens.
+      const diagnostics = [
+        "model returned an empty response",
+        `model=${model}`,
+        `attempt=${emptyRetries + 1}`,
+        `iteration=${iterations}`,
+        `done_reason=${doneReason ?? "unknown"}`,
+        `thinking_chars=${thinking.length}`,
+        `eval_count=${evalCount}`,
+        `prompt_eval_count=${promptEvalCount}`,
+      ].join(" ");
+      if (message.content.trim() === "") {
+        if (emptyRetries < 1 && i < maxIterations - 1) {
+          emptyRetries += 1;
+          onWarning?.(`${diagnostics} — retrying once with a nudge`);
+          messages.push({
+            role: "user",
+            content:
+              "Your previous response was empty. Please answer the user's last request in plain text, or call a tool if you need data.",
+          });
+          continue;
+        }
+        throw new Error(diagnostics);
+      }
+      const reply = message.content;
+      if (persist) {
+        await persist([{ role: "assistant", content: reply, ts: now() }]);
+      }
+      const result: LoopResult = { reply, toolTrace, pendingConfirmation, iterations, evalCount, promptEvalCount, compacted };
+      await onEvent?.({ type: "done", ...result });
+      return result;
     }
 
-    messages.push({
+    const assistantMessage: OllamaMessage = {
       role: "assistant",
-      content: stripThinking(response.content),
-      tool_calls: toolCalls,
-    });
+      content: message.content,
+      tool_calls: message.tool_calls,
+    };
+    messages.push(assistantMessage);
+    const persisted: StoredMessage[] = [
+      {
+        role: "assistant",
+        content: message.content,
+        tool_calls: message.tool_calls,
+        ts: now(),
+      },
+    ];
 
-    for (const call of toolCalls) {
+    for (const call of message.tool_calls) {
       const def = tools.find((t) => t.name === call.function.name);
-      let resultText: string;
+      let result: unknown;
+      let status: ToolTraceEntry["status"] = "ok";
       if (!def) {
-        resultText = JSON.stringify({
-          error: `Unknown tool "${call.function.name}". Available tools: ${tools.map((t) => t.name).join(", ")}.`,
-        });
+        result = { error: `unknown tool: ${call.function.name}` };
+        status = "error";
       } else {
         const parsed = def.schema.safeParse(call.function.arguments);
         if (!parsed.success) {
-          resultText = JSON.stringify({
-            error: `Invalid arguments for ${def.name}: ${parsed.error.issues
-              .map((i) => `${i.path.join(".") || "args"}: ${i.message}`)
-              .join("; ")}.`,
-          });
+          result = {
+            error: `invalid arguments for ${def.name}: ${parsed.error.issues
+              .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+              .join("; ")}`,
+          };
+          status = "error";
+        } else if (def.requiresConfirmation) {
+          pendingConfirmation = {
+            tool: def.name,
+            args: parsed.data as Record<string, unknown>,
+            ...(makeProposalId ? { id: makeProposalId() } : {}),
+          };
+          result = {
+            pendingConfirmation: `proposed ${def.name}; awaiting user confirmation`,
+          };
+          status = "pending_confirmation";
         } else {
-          const result = await def.run(parsed.data, toolContext);
-          resultText = JSON.stringify(result);
+          try {
+            result = await def.run(parsed.data as never, ctx);
+          } catch (err) {
+            result = { error: `tool ${def.name} failed: ${(err as Error).message}` };
+            status = "error";
+          }
         }
       }
-      yield { type: "tool", name: call.function.name, summary: summarize(call.function.name, call.function.arguments) };
-      messages.push({ role: "tool", content: resultText, tool_name: call.function.name });
+      const summary = summarize(call.function.name, result);
+      toolTrace.push({ name: call.function.name, status, summary });
+      await onEvent?.({ type: "tool", name: call.function.name, status, summary });
+      if (status === "pending_confirmation" && pendingConfirmation) {
+        await onEvent?.({ type: "confirm", pending: pendingConfirmation });
+      }
+      const toolMessage: OllamaMessage = {
+        role: "tool",
+        tool_call_id: call.id,
+        name: call.function.name,
+        content: JSON.stringify(result),
+      };
+      messages.push(toolMessage);
+      persisted.push({
+        role: "tool",
+        tool_call_id: call.id,
+        name: call.function.name,
+        content: JSON.stringify(result),
+        ts: now(),
+      });
     }
+    if (persist) await persist(persisted);
   }
 
-  if (reply) {
-    await appendMessages(options.sessionId, options.userRef, [toHistoryMessage("assistant", reply)]);
+  const reply =
+    "I hit the iteration cap while working on that — please rephrase or break the request into smaller steps.";
+  if (persist) {
+    await persist([{ role: "assistant", content: reply, ts: now() }]);
   }
-
-  yield { type: "message", content: reply };
+  const result: LoopResult = { reply, toolTrace, pendingConfirmation, iterations, evalCount, promptEvalCount, compacted };
+  await onEvent?.({ type: "done", ...result });
+  return result;
 }

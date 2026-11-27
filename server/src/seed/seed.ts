@@ -12,6 +12,7 @@ import {
   isWindowSeat,
   type Dataset,
 } from "./generate.ts";
+import { config } from "../config.ts";
 
 const MIGRATIONS: string[] = [
   "ALTER TABLE airport ADD COLUMN IF NOT EXISTS tags TEXT NOT NULL DEFAULT ''",
@@ -26,7 +27,7 @@ const schemaPath = path.join(here, "..", "db", "schema.sql");
 function parseArgs(argv: string[]): { check: boolean; demoHold: boolean; seed: number } {
   let check = false;
   let demoHold = false;
-  let seed = Number.parseInt(process.env.SEED ?? "42", 10);
+  let seed = config.seed;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === "--check") check = true;
@@ -128,9 +129,7 @@ function chunk<T>(rows: T[], size: number): T[][] {
 async function writeToPostgres(data: Dataset): Promise<void> {
   const { default: pg } = await import("pg");
   const client = new pg.Client({
-    connectionString:
-      process.env.DATABASE_URL ??
-      "postgres://flight:flight@localhost:5432/flight_agent",
+    connectionString: config.databaseUrl,
   });
   await client.connect();
   try {
