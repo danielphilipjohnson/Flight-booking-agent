@@ -10,6 +10,11 @@ export function parseIsoDate(value: string): ParsedDate | null {
   return { date, iso: value };
 }
 
+export function iso(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  return String(value);
+}
+
 export function isoDay(date: Date): string {
   return date.toISOString().slice(0, 10);
 }

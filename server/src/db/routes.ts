@@ -1,6 +1,7 @@
 import { pool } from "./postgres.ts";
 import type { Queryable } from "./types.ts";
 import { listAirportCities } from "./queries/airports.ts";
+import { listRoutePairs } from "./queries/flights.ts";
 import type { RouteBrief } from "../agent/prompt.ts";
 
 export async function loadRouteBriefFrom(db: Queryable): Promise<RouteBrief> {
@@ -12,9 +13,7 @@ export async function loadRouteBriefFrom(db: Queryable): Promise<RouteBrief> {
     codes.push(String(row.iata));
     cities.set(city, codes);
   }
-  const routeRows = (
-    await db.query("SELECT DISTINCT origin, destination FROM flight ORDER BY origin, destination")
-  ).rows;
+  const routeRows = await listRoutePairs(db);
   return {
     cities: [...cities.entries()]
       .map(([city, codes]) => ({ city, codes }))
