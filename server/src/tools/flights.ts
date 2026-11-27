@@ -1,6 +1,22 @@
 import type { Queryable } from "../db/types.ts";
 import { resolveAirports, type AirportRowLite } from "../agent/airports.ts";
-import { dateWindow, isoDay } from "../agent/dates.ts";
+import { dateWindow, iso, isoDay } from "../agent/dates.ts";
+import { bookingsByUser, releaseExpiredHoldsStatements } from "../db/queries/bookings.ts";
+import {
+  availableSeatRows,
+  availableSeatsWithBrand,
+  fareRuleSeatRows,
+  seatAvailabilityRows,
+  seatSummaryRows,
+} from "../db/queries/seats.ts";
+import {
+  allFlights as allFlightsRows,
+  flightExists,
+  flightWithAirline,
+  flightsBetween as flightsBetweenRows,
+  listRoutePairs,
+} from "../db/queries/flights.ts";
+import { listAirports } from "../db/queries/airports.ts";
 import {
   filterOffersInput,
   findFirstAvailableFlightInput,
@@ -21,36 +37,11 @@ import {
   type ToolDef,
 } from "./schemas.ts";
 
-export function iso(value: unknown): string {
-  if (value instanceof Date) return value.toISOString();
-  return String(value);
-}
+export { iso } from "../agent/dates.ts";
 
 function seatSortKey(seatNo: string): [number, string] {
   const match = /^(\d+)([A-F])$/.exec(seatNo);
   return match ? [Number(match[1]), match[2]!] : [999, seatNo];
-}
-
-export async function releaseExpiredHoldsStatements(q: Queryable, now = new Date()): Promise<number> {
-  const cutoff = iso(now);
-  const expired = await q.query(
-    "SELECT id FROM booking WHERE status = 'held' AND hold_expires_at IS NOT NULL AND hold_expires_at < $1",
-    [cutoff],
-  );
-  if (expired.rows.length === 0) return 0;
-  await q.query(
-    "UPDATE booking_seat SET active = FALSE WHERE booking_id IN (SELECT id FROM booking WHERE status = 'held' AND hold_expires_at IS NOT NULL AND hold_expires_at < $1)",
-    [cutoff],
-  );
-  await q.query(
-    "UPDATE seat SET status = 'available', hold_expires_at = NULL WHERE status = 'held' AND hold_expires_at IS NOT NULL AND hold_expires_at < $1",
-    [cutoff],
-  );
-  await q.query(
-    "UPDATE booking SET status = 'cancelled', hold_expires_at = NULL WHERE status = 'held' AND hold_expires_at IS NOT NULL AND hold_expires_at < $1",
-    [cutoff],
-  );
-  return expired.rows.length;
 }
 
 export async function releaseExpiredHolds(db: Queryable, now = new Date()): Promise<number> {
@@ -68,9 +59,7 @@ async function resolveCodes(db: Queryable, value: string): Promise<string[]> {
 }
 
 async function allAirports(db: Queryable): Promise<(AirportRowLite & { tags: string })[]> {
-  const rows = (
-    await db.query("SELECT iata, name, city, country, tags FROM airport ORDER BY iata")
-  ).rows;
+  const rows = await listAirports(db);
   return rows.map((r) => ({
     iata: String(r.iata),
     name: String(r.name),
@@ -109,12 +98,7 @@ interface FlightRow {
 }
 
 async function allFlights(db: Queryable): Promise<FlightRow[]> {
-  const rows = (
-    await db.query(
-      "SELECT id, flight_no, origin, destination, departs_at, arrives_at, base_price, airline_code, on_time_pct FROM flight",
-    )
-  ).rows;
-  return rows as unknown as FlightRow[];
+  return (await allFlightsRows(db)) as unknown as FlightRow[];
 }
 
 async function flightsBetween(
@@ -122,18 +106,7 @@ async function flightsBetween(
   originCodes: string[],
   destinationCodes: string[],
 ): Promise<FlightRow[]> {
-  const originPh = originCodes.map((_, i) => `$${i + 1}`).join(", ");
-  const destPh = destinationCodes
-    .map((_, i) => `$${originCodes.length + i + 1}`)
-    .join(", ");
-  const rows = (
-    await db.query(
-      `SELECT id, flight_no, origin, destination, departs_at, arrives_at, base_price, airline_code, on_time_pct
-       FROM flight WHERE origin IN (${originPh}) AND destination IN (${destPh})`,
-      [...originCodes, ...destinationCodes],
-    )
-  ).rows;
-  return rows as unknown as FlightRow[];
+  return (await flightsBetweenRows(db, originCodes, destinationCodes)) as unknown as FlightRow[];
 }
 
 interface SeatAggregate {
@@ -145,18 +118,7 @@ async function seatAggregatesByFlight(
   db: Queryable,
   cabin: string | undefined,
 ): Promise<Map<string, SeatAggregate>> {
-  const rows = cabin
-    ? (
-        await db.query(
-          "SELECT flight_id, MIN(price) AS min_price, COUNT(*) AS n FROM seat WHERE status = 'available' AND class = $1 GROUP BY flight_id",
-          [cabin],
-        )
-      ).rows
-    : (
-        await db.query(
-          "SELECT flight_id, MIN(price) AS min_price, COUNT(*) AS n FROM seat WHERE status = 'available' GROUP BY flight_id",
-        )
-      ).rows;
+  const rows = await seatAvailabilityRows(db, cabin);
   const map = new Map<string, SeatAggregate>();
   for (const r of rows) {
     map.set(String(r.flight_id), {
@@ -387,12 +349,9 @@ export function createFlightTools(db: Queryable): ToolDef[] {
         .sort((a, b) => iso(a.departs_at).localeCompare(iso(b.departs_at)));
 
       for (const flight of candidates) {
-        const seatRows = (
-          await db.query(
-            "SELECT seat_no, class, price FROM seat WHERE flight_id = $1 AND status = 'available'",
-            [flight.id],
-          )
-        ).rows.filter((r) => !cabin || r.class === cabin);
+        const seatRows = (await availableSeatRows(db, String(flight.id))).filter(
+          (r) => !cabin || r.class === cabin,
+        );
         if (seatRows.length === 0) continue;
         seatRows.sort((a, b) => {
           const [ra, la] = seatSortKey(String(a.seat_no));
@@ -458,38 +417,17 @@ export function createFlightTools(db: Queryable): ToolDef[] {
     run: async (args, _ctx) => {
       const { flight_id } = getFlightDetailsInput.parse(args) as { flight_id: string };
       await releaseExpiredHolds(db);
-      const flights = (
-        await db.query(
-          `SELECT f.id, f.flight_no, f.origin, f.destination, f.departs_at, f.arrives_at, f.base_price,
-                  f.airline_code, f.on_time_pct, al.name AS airline_name
-           FROM flight f JOIN airline al ON al.code = f.airline_code
-           WHERE f.id = $1`,
-          [flight_id],
-        )
-      ).rows;
+      const flights = await flightWithAirline(db, flight_id);
       if (flights.length === 0) return { error: `no flight with id ${flight_id}` };
       const f = flights[0]!;
-      const summary = (
-        await db.query(
-          "SELECT class, status, COUNT(*) AS n, MIN(price) AS min_price FROM seat WHERE flight_id = $1 GROUP BY class, status ORDER BY class, status",
-          [flight_id],
-        )
-      ).rows.map((r) => ({
+      const summary = (await seatSummaryRows(db, flight_id)).map((r) => ({
         class: r.class,
         status: r.status,
         n: Number(r.n),
         min_price: r.min_price,
       }));
 
-      const seatRows = (
-        await db.query(
-          `SELECT s.class, s.fare_brand, s.price, s.seat_no,
-                  fr.carry_on, fr.checked_bags, fr.refundable, fr.changeable, fr.change_fee
-           FROM seat s JOIN fare_rule fr ON fr.brand = s.fare_brand
-           WHERE s.flight_id = $1 AND s.status = 'available'`,
-          [flight_id],
-        )
-      ).rows;
+      const seatRows = await fareRuleSeatRows(db, flight_id);
       const fareRules: Record<string, unknown> = {};
       for (const row of seatRows) {
         const cabinClass = String(row.class);
@@ -548,21 +486,14 @@ export function createFlightTools(db: Queryable): ToolDef[] {
       };
       const flight_id = parsed.flight_id;
       await releaseExpiredHolds(db);
-      let rows = (
-        await db.query(
-          "SELECT seat_no, class, price, fare_brand FROM seat WHERE flight_id = $1 AND status = 'available'",
-          [flight_id],
-        )
-      ).rows;
+      let rows = await availableSeatsWithBrand(db, flight_id);
       if (parsed.class) rows = rows.filter((r) => r.class === parsed.class);
       rows.sort((a, b) => {
         const [ra, la] = seatSortKey(String(a.seat_no));
         const [rb, lb] = seatSortKey(String(b.seat_no));
         return ra - rb || la.localeCompare(lb);
       });
-      const exists = (
-        await db.query("SELECT id FROM flight WHERE id = $1", [flight_id])
-      ).rows;
+      const exists = await flightExists(db, flight_id);
       if (exists.length === 0) return { error: `no flight with id ${flight_id}` };
       return {
         flight_id,
@@ -880,18 +811,7 @@ export function createFlightTools(db: Queryable): ToolDef[] {
       "List the logged-in session user's active bookings with flight info. Takes no arguments; identity comes from the session. Cancelled bookings are excluded.",
     schema: listMyBookingsInput,
     run: async (_args, ctx: ToolContext) => {
-      const rows = (
-        await db.query(
-          `SELECT b.id AS booking_id, b.status, b.passenger_name, b.created_at,
-                  bs.flight_id, bs.seat_no, f.flight_no, f.origin, f.destination, f.departs_at
-           FROM booking b
-           JOIN booking_seat bs ON bs.booking_id = b.id AND bs.active = TRUE
-           JOIN flight f ON f.id = bs.flight_id
-           WHERE b.user_ref = $1 AND b.status <> 'cancelled'
-           ORDER BY b.created_at`,
-          [ctx.userRef],
-        )
-      ).rows;
+      const rows = await bookingsByUser(db, ctx.userRef);
       return {
         bookings: rows.map((r) => ({
           booking_id: r.booking_id,
