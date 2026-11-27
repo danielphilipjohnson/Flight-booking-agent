@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import { z } from "zod";
 import { createOllamaClient } from "../agent/ollama.ts";
 import { driveLoop, type LoopEvent } from "../agent/loop.ts";
+import { parseChatBody, toSseFrame, turnStats } from "./chat-protocol.ts";
 import { buildSystemPrompt } from "../agent/prompt.ts";
 import { config } from "../config.ts";
 import { pgQueryable } from "../db/postgres.ts";
@@ -26,11 +26,6 @@ async function saveProposal(sessionId: string, pending: { id?: string; tool: str
   await sessions().updateOne({ _id: sessionId }, { $set: { pending_proposal: proposal } });
 }
 
-const chatBody = z.object({
-  sessionId: z.string().uuid(),
-  message: z.string().min(1).max(4000),
-});
-
 async function loadChatContext(
   req: FastifyRequest,
   reply: FastifyReply,
@@ -43,12 +38,12 @@ async function loadChatContext(
   persist: (messages: StoredMessage[]) => Promise<void>;
   summaryCache: SummaryCache;
 } | null> {
-  const parsed = chatBody.safeParse(req.body);
-  if (!parsed.success) {
-    await reply.code(400).send({ error: "sessionId (uuid) and message are required" });
+  const parsed = parseChatBody(req.body);
+  if (!parsed.ok) {
+    await reply.code(400).send({ error: parsed.error });
     return null;
   }
-  const { sessionId, message } = parsed.data;
+  const { sessionId, message } = parsed;
   const session = await sessions().findOne({ _id: sessionId });
   if (!session) {
     await reply.code(404).send({ error: "unknown session — log in first" });
@@ -111,26 +106,13 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
 
     const started = Date.now();
     const onEvent = async (event: LoopEvent) => {
-      if (event.type === "done") {
-        send("done", {
-          sessionId,
-          reply: event.reply,
-          toolTrace: event.toolTrace,
-          pendingConfirmation: event.pendingConfirmation,
-          stats: {
-            iterations: event.iterations,
-            evalCount: event.evalCount,
-            promptEvalCount: event.promptEvalCount,
-            compacted: event.compacted,
-            latencyMs: Date.now() - started,
-          },
-        });
-      } else if (event.type === "confirm") {
+      if (event.type === "confirm") {
         await saveProposal(sessionId, event.pending);
         send(event.type, event);
-      } else {
-        send(event.type, event);
+        return;
       }
+      const frame = toSseFrame(event, sessionId, started);
+      send(frame.event, frame.data);
     };
 
     const onWarning = (message: string) => {
@@ -217,13 +199,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       if (result.pendingConfirmation?.id) {
         await saveProposal(sessionId, result.pendingConfirmation);
       }
-      const stats = {
-        iterations: result.iterations,
-        evalCount: result.evalCount,
-        promptEvalCount: result.promptEvalCount,
-        compacted: result.compacted,
-        latencyMs: Date.now() - started,
-      };
+      const stats = turnStats(result, started);
       req.log.info({ sessionId, ...stats }, "chat turn");
       return {
         sessionId,
