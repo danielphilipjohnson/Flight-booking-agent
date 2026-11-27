@@ -145,7 +145,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         history: session.messages,
         userMessage: message,
         tools: registry.tools,
-        ctx: { userRef: session.user_ref, displayName: session.display_name },
+        ctx: { userRef: session.user_ref, displayName: session.display_name, sessionId },
         maxIterations: 8,
         context: {
           maxMessages: config.maxHistoryMessages,
@@ -200,7 +200,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
         history: session.messages,
         userMessage: message,
         tools: registry.tools,
-        ctx: { userRef: session.user_ref, displayName: session.display_name },
+        ctx: { userRef: session.user_ref, displayName: session.display_name, sessionId },
         maxIterations: 8,
         context: {
           maxMessages: config.maxHistoryMessages,

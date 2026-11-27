@@ -32,11 +32,14 @@ user (browser) --> Next.js chat UI --> POST /api/chat (SSE) --> Fastify agent AP
 | --- | --- | --- |
 | UI | Next.js (App Router) | Chat interface; the agent layer sits behind the API so the UI is swappable |
 | API | Fastify (TypeScript) | Agent loop lives here |
-| LLM | Ollama local (`qwen3` class) | No API cost; tool calling via `/api/chat` |
+| LLM | Ollama local (`gemma4:12b` default) | No API cost; tool calling via `/api/chat` |
 | Tool validation | Zod schemas per tool | Reject hallucinated arguments before they reach SQL |
 | Booking data | Postgres | Relational constraints, transactions, `SELECT FOR UPDATE` |
 | Chat history | MongoDB | One document per session, `$push` appends |
 | Infra | Docker Compose | `postgres` + `mongo` + `ollama`, one command up |
+
+For how the search agent behaves and how conversations are designed to flow,
+see [docs/flight-search-agent.md](docs/flight-search-agent.md).
 
 ## Repo layout
 
@@ -60,9 +63,10 @@ user (browser) --> Next.js chat UI --> POST /api/chat (SSE) --> Fastify agent AP
 │       ├── routes/         # /api/health, /api/login, /api/conversations, /api/chat, /api/sessions/:id
 │       ├── tools/
 │       │   ├── schemas.ts  # Zod schemas + tool registry types
-│       │   └── flights.ts  # 4 read tools (search/details/seats/my bookings)
+│       │   └── flights.ts  # 9 read tools (search/round trips/price calendar/browse/
+│       │   │             # themes/filter/fare rules/seats/my bookings)
 │       ├── seed/           # deterministic dataset generator + seed CLI + harness
-│       └── test/           # tools / prompt / loop harnesses (run without Docker)
+│       └── test/           # tools / prompt / loop / unit harnesses + fuzzers (no Docker)
 └── web/                    # Next.js UI: login -> conversations list -> chat
     └── src/
         ├── app/            # / (conversations) and /chat/[sessionId]
@@ -73,11 +77,13 @@ user (browser) --> Next.js chat UI --> POST /api/chat (SSE) --> Fastify agent AP
 
 ```bash
 docker compose up -d
-docker compose exec ollama ollama pull qwen3   # once
+docker compose exec ollama ollama pull gemma4:12b   # once (or set OLLAMA_MODEL)
 cp .env.example .env
 npm install
 npm run seed:check   # preview the dataset, no DB write
 npm run seed         # flights + mock users (schema auto-applies on first compose boot)
+npm run fuzz:live    # optional: fuzzer against live Postgres (after seed)
+npm run fuzz:agent   # optional: fuzzer through Ollama + full stack
 npm run dev:server   # Fastify agent API on :3001
 npm run dev:web      # Next chat UI on :3000
 ```
@@ -85,7 +91,25 @@ npm run dev:web      # Next chat UI on :3000
 `npm test` runs all harnesses (no database or Docker needed): seed invariants plus a
 `node:sqlite` simulation of `schema.sql`, the read tools against the seeded dataset,
 the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
-(fragment reassembly, Zod rejection, unknown tool, iteration cap, confirm gate).
+(fragment reassembly, Zod rejection, unknown tool, iteration cap, confirm gate),
+plus a unit harness (airport resolution, date windows, tool schemas) and a
+deterministic fuzzer (`npm run fuzz`, seed=42) asserting the tool schemas,
+resolver and date layers never throw or violate their invariants on junk input.
+`npm run fuzz:live` (Postgres) and `npm run fuzz:agent` (full stack + Ollama)
+run the same invariants and randomized conversations against the real stack.
+
+## Prices & offers (policy)
+
+- **Prices are static demo data.** The dataset is local, so reads are live
+  against Postgres but the fares themselves are generated, not GDS quotes.
+  Nothing here pretends to be a live fare; live quotes are deferred until a
+  real inventory source (e.g. Duffel) exists.
+- **Re-validate before writing.** Because availability moves (holds expire,
+  seats get claimed), the confirm step in Phase 3 re-reads the seat state
+  before any write - the "price may have changed" moment lives there.
+- **Fare rules are data, not prose.** Bags, refundability and change fees
+  come from the `fare_rule` table via each seat's `fare_brand` - Basic Economy
+  has no carry-on, and the prompt forbids hiding that next to a price.
 
 ## Design decisions that carry the portfolio story
 
@@ -124,7 +148,7 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 | Phase | Scope | Done when |
 | --- | --- | --- |
 | 1. Foundations | Repo scaffold, Docker Compose, schema, deterministic seed | `docker compose up` + `npm run seed` gives queryable data (PR #1, merged) |
-| 2. Read-only agent | Agent loop, 4 read tools, Ollama tool-calling, chat UI, Mongo history | "flights to Lisbon tomorrow" → correct multi-step tool calls; per-user history survives restart (PR #2, merged) |
+| 2. Read-only agent | Agent loop, 9 read tools (search, round trips, flexible prices, browse, theme browse, filter, fare rules, seats, resolver), Ollama tool-calling, chat UI, Mongo history | "flights to Lisbon tomorrow" → correct multi-step tool calls; "is a carry-on included?" answered from fare rules; per-user history survives restart (PR #2 + PR #36, merged) |
 | 3. Booking + transactions | hold/create/cancel, `FOR UPDATE`, confirm gate, concurrency test | Two parallel booking attempts → exactly one wins (PR #7, merged) |
 | 4. Hardening + evals | Malformed-arg retry, iteration cap, sliding-window + ID-preserving compaction, 13-scenario eval suite, token/latency stats | Eval suite passes; "book without asking" is refused (this PR) |
 | 5. Portfolio polish | SSE streaming chat, architecture diagram, concurrency write-up, demo script | Reviewer clones, `compose up`, books a seat in <10 min (this PR; recording is a manual step — see docs/DEMO.md) |
@@ -146,14 +170,18 @@ the dynamic prompt assembly, and the agent loop against a scripted fake Ollama
 Agent errors and warnings are appended as JSON lines to `logs/agent-errors.log`
 (override with `ERROR_LOG_FILE`) and also written to the server console.
 
-## Tool contract (Phase 2 — read tools)
+## Tool contract (read tools)
 
 | Tool | Args | Returns |
 | --- | --- | --- |
-| `search_flights` | `origin`, `destination` (IATA or city), `date` (ISO) | `{ results: [{ flight_id, flight_no, departs_at }] }` — IDs only, by design |
-| `find_first_available_flight` | `month?` (`YYYY-MM`) or `from_date`/`to_date`, `origin?`/`destination?` (omit both for every route), `class?` | First flight in the range with an available seat, plus times, base price, seat count, min price, and sample seats |
-| `get_flight_details` | `flight_id` | times, base price, `seat_summary` per class/status |
-| `list_available_seats` | `flight_id`, `class?` | `{ available_seats: [{ seat_no, class, price }] }` |
+| `search_flights` | `origin`, `destination` (IATA or city), `date` (ISO), `return_date?` | Results with airports, times, duration, `base_price`, `on_time_pct`; round trips add `return_results` + `round_trip_total_from` (or `empty_leg`) |
+| `find_first_available_flight` | `month?` (`YYYY-MM`) or `from_date`/`to_date`, `origin?`/`destination?` (omit both for every route), `class?` | First flight in the range with an available seat, plus times, base price, on-time pct, seat count, min price, and sample seats |
+| `get_flight_details` | `flight_id` | airline, on-time pct, times, base price, `seat_summary` per class/status, per-class `fare_rules` (brand, bags, refundability, change fee) |
+| `list_available_seats` | `flight_id`, `class?` | `{ available_seats: [{ seat_no, class, fare_brand, price }] }` |
+| `search_flexible_prices` | `origin`, `destination`, `from_date`, `days?` (≤14), `class?` | Per-day cheapest prices + `cheapest_day` |
+| `search_anywhere` | `origin`, `from_date?`, `days?`, `max_price?` | Up to 10 destinations, cheapest-economy order |
+| `search_inspiration` | `origin`, `theme`, `from_date?`, `days?`, `max_price?` | Theme-matched destinations, price-ranked |
+| `filter_offers` | `max_price?`, `depart_after?`, `depart_before?`, `sort?` | Filtered + re-sorted last search, no re-query |
 | `list_my_bookings` | — (session identity injected) | `{ bookings: [...] }`, cancelled excluded by SQL |
 
 Write tools (`hold_seat`, `create_booking`, `cancel_booking`) are confirm-gated: the
@@ -209,7 +237,7 @@ error. Run `npm test` to see it.
 ```bash
 git clone <repo-url> && cd Flight-booking-agent
 docker compose up -d
-docker compose exec ollama ollama pull qwen3   # once
+docker compose exec ollama ollama pull gemma4:12b   # once (or set OLLAMA_MODEL)
 cp .env.example .env && npm install
 npm run seed          # deterministic dataset
 npm run dev:server    # :3001
@@ -217,7 +245,7 @@ npm run dev:web       # :3000 — log in as ava / PIN 4321
 ```
 
 Ask "flights from London to Lisbon tomorrow", then "hold 12F on the evening one",
-Confirm, "book it for Ava". `npm test` runs 191 assertions (no Docker needed).
+Confirm, "book it for Ava". `npm test` runs 281 server assertions plus the web vitest suite (no Docker needed).
 
 ## Demo
 

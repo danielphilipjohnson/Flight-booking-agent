@@ -7,6 +7,7 @@ import {
   AIRPORTS,
   DAYS,
   DEMO_HOLD_MINUTES,
+  FARE_RULES,
   SEATS_PER_FLIGHT,
   SELLOUT_DEMO_HOLD_SEAT,
   SELLOUT_FREE_SEATS,
@@ -44,6 +45,27 @@ const withHold = generateDataset(42, { now: fixedNow, demoHold: true });
 
 section("structure");
 ok(data.airports.length === 8, "8 airports seeded");
+ok(data.airlines.length === 1 && data.airlines[0]!.code === "FF", "1 airline seeded (FF)");
+ok(data.fareRules.length === 3, "3 fare rules seeded");
+ok(
+  FARE_RULES.every((rule) => {
+    const brand = rule.brand;
+    const expected = { basic: [false, 0, false, true, "45.00"], standard: [true, 1, false, true, "25.00"], flex: [true, 2, true, true, "0.00"] }[brand];
+    return (
+      expected !== undefined &&
+      rule.carry_on === expected[0] &&
+      rule.checked_bags === expected[1] &&
+      rule.refundable === expected[2] &&
+      rule.changeable === expected[3] &&
+      rule.change_fee === expected[4]
+    );
+  }),
+  "fare rules: basic has no carry-on, standard has 1 bag, flex is refundable",
+);
+ok(
+  data.airports.filter((a) => a.tags.includes("beach")).map((a) => a.iata).sort().join(",") === "BCN,LIS,MAD",
+  "beach tag on LIS/BCN/MAD only",
+);
 ok(data.users.length === 5 && data.users.every((u) => u.pin === "4321"), "5 mock users, shared demo PIN");
 ok(data.flights.length === 10 * DAYS * 3, "420 flights (10 directed routes x 14 days x 3 waves)");
 ok(new Set(data.flights.map((f) => f.flight_no)).size === data.flights.length, "flight_no unique");
@@ -52,9 +74,27 @@ const airportCodes = new Set(data.airports.map((a) => a.iata));
 ok(data.flights.every((f) => airportCodes.has(f.origin) && airportCodes.has(f.destination)), "every flight endpoint is a known airport");
 ok(data.airports.every((a) => data.flights.some((f) => f.origin === a.iata || f.destination === a.iata)), "all 8 airports in use");
 ok(data.flights.every((f) => f.departs_at < f.arrives_at), "departs_at < arrives_at for every flight");
+ok(data.flights.every((f) => f.airline_code === "FF"), "every flight belongs to airline FF");
+ok(
+  data.flights.every((f) => {
+    const pct = Number(f.on_time_pct);
+    const waveBand: Record<number, [number, number]> = { 0: [93, 98], 1: [95, 99], 2: [87, 95] };
+    const [low, high] = waveBand[f.wave]!;
+    return pct >= low && pct <= high;
+  }),
+  "on-time pct within the per-wave band on every flight",
+);
 const perFlightSeats = new Map<string, number>();
 for (const s of data.seats) perFlightSeats.set(s.flight_id, (perFlightSeats.get(s.flight_id) ?? 0) + 1);
 ok([...perFlightSeats.values()].every((n) => n === SEATS_PER_FLIGHT), "exactly 72 seats per flight");
+ok(
+  data.flights.every((f) => {
+    const seats = seatsOf(data, f.flight_no);
+    const byBrand = (brand: string) => seats.filter((s) => s.fare_brand === brand).length;
+    return byBrand("flex") === 12 && byBrand("standard") === 24 && byBrand("basic") === 36;
+  }),
+  "fare brands per flight: 12 flex (rows 1-2), 24 standard (rows 3-6), 36 basic (rows 7-12)",
+);
 ok(
   data.flights.every((f) => {
     const business = seatsOf(data, f.flight_no).filter((s) => s.class === "business");
@@ -157,16 +197,20 @@ db.exec("PRAGMA foreign_keys = ON;");
 db.exec(schemaSql);
 
 function insertAll(d: Dataset): void {
-  const insAirport = db.prepare("INSERT INTO airport (iata, name, city, country) VALUES (?, ?, ?, ?)");
+  const insAirline = db.prepare("INSERT INTO airline (code, name) VALUES (?, ?)");
+  const insFareRule = db.prepare("INSERT INTO fare_rule (brand, carry_on, checked_bags, refundable, changeable, change_fee) VALUES (?, ?, ?, ?, ?, ?)");
+  const insAirport = db.prepare("INSERT INTO airport (iata, name, city, country, tags) VALUES (?, ?, ?, ?, ?)");
   const insUser = db.prepare("INSERT INTO app_user (user_ref, display_name, pin) VALUES (?, ?, ?)");
-  const insFlight = db.prepare("INSERT INTO flight (id, flight_no, origin, destination, departs_at, arrives_at, base_price) VALUES (?, ?, ?, ?, ?, ?, ?)");
-  const insSeat = db.prepare("INSERT INTO seat (flight_id, seat_no, class, price, status, hold_expires_at) VALUES (?, ?, ?, ?, ?, ?)");
+  const insFlight = db.prepare("INSERT INTO flight (id, flight_no, origin, destination, departs_at, arrives_at, base_price, airline_code, on_time_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  const insSeat = db.prepare("INSERT INTO seat (flight_id, seat_no, class, fare_brand, price, status, hold_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
   const insBooking = db.prepare("INSERT INTO booking (id, user_ref, status, passenger_name, created_at, hold_expires_at) VALUES (?, ?, ?, ?, ?, ?)");
   const insBs = db.prepare("INSERT INTO booking_seat (booking_id, flight_id, seat_no, active) VALUES (?, ?, ?, ?)");
-  for (const a of d.airports) insAirport.run(a.iata, a.name, a.city, a.country);
+  for (const a of d.airlines) insAirline.run(a.code, a.name);
+  for (const r of d.fareRules) insFareRule.run(r.brand, r.carry_on ? 1 : 0, r.checked_bags, r.refundable ? 1 : 0, r.changeable ? 1 : 0, r.change_fee);
+  for (const a of d.airports) insAirport.run(a.iata, a.name, a.city, a.country, a.tags);
   for (const u of d.users) insUser.run(u.user_ref, u.display_name, u.pin);
-  for (const f of d.flights) insFlight.run(f.id, f.flight_no, f.origin, f.destination, f.departs_at.toISOString(), f.arrives_at.toISOString(), f.base_price);
-  for (const s of d.seats) insSeat.run(s.flight_id, s.seat_no, s.class, s.price, s.status, s.hold_expires_at?.toISOString() ?? null);
+  for (const f of d.flights) insFlight.run(f.id, f.flight_no, f.origin, f.destination, f.departs_at.toISOString(), f.arrives_at.toISOString(), f.base_price, f.airline_code, f.on_time_pct);
+  for (const s of d.seats) insSeat.run(s.flight_id, s.seat_no, s.class, s.fare_brand, s.price, s.status, s.hold_expires_at?.toISOString() ?? null);
   for (const b of d.bookings) insBooking.run(b.id, b.user_ref, b.status, b.passenger_name, b.created_at.toISOString(), b.hold_expires_at?.toISOString() ?? null);
   for (const bs of d.bookingSeats) insBs.run(bs.booking_id, bs.flight_id, bs.seat_no, bs.active ? 1 : 0);
 }
@@ -176,7 +220,7 @@ function count(table: string): number {
 }
 
 insertAll(data);
-ok(count("airport") === 8 && count("app_user") === 5 && count("flight") === 420 && count("seat") === 30240 && count("booking") === 5 && count("booking_seat") === 5, "full dataset lands in the real schema");
+ok(count("airport") === 8 && count("airline") === 1 && count("fare_rule") === 3 && count("app_user") === 5 && count("flight") === 420 && count("seat") === 30240 && count("booking") === 5 && count("booking_seat") === 5, "full dataset lands in the real schema");
 
 function expectThrow(label: string, fn: () => void): void {
   let threw = false;
@@ -225,7 +269,7 @@ expectThrow("booking_seat row for an unknown seat rejected (FK)", () =>
   probeClaim.run(uuidFor("booking:ben:probe"), data.flights[0]!.id, "99Z", 1),
 );
 
-db.exec("DELETE FROM booking_seat; DELETE FROM booking; DELETE FROM seat; DELETE FROM flight; DELETE FROM app_user; DELETE FROM airport;");
+db.exec("DELETE FROM booking_seat; DELETE FROM booking; DELETE FROM seat; DELETE FROM flight; DELETE FROM app_user; DELETE FROM airline; DELETE FROM airport; DELETE FROM fare_rule;");
 insertAll(dataAgain);
 ok(count("flight") === 420 && count("seat") === 30240 && count("booking") === 5, "reseed is idempotent (TRUNCATE + insert reproduces identical counts)");
 

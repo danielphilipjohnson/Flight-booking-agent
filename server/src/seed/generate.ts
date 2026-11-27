@@ -5,6 +5,23 @@ export interface AirportRow {
   name: string;
   city: string;
   country: string;
+  tags: string;
+}
+
+export type FareBrand = "basic" | "standard" | "flex";
+
+export interface AirlineRow {
+  code: string;
+  name: string;
+}
+
+export interface FareRuleRow {
+  brand: FareBrand;
+  carry_on: boolean;
+  checked_bags: number;
+  refundable: boolean;
+  changeable: boolean;
+  change_fee: string;
 }
 
 export interface UserRow {
@@ -21,6 +38,8 @@ export interface FlightRow {
   departs_at: Date;
   arrives_at: Date;
   base_price: string;
+  airline_code: string;
+  on_time_pct: string;
   day: number;
   wave: number;
 }
@@ -29,6 +48,7 @@ export interface SeatRow {
   flight_id: string;
   seat_no: string;
   class: "economy" | "business";
+  fare_brand: FareBrand;
   price: string;
   status: "available" | "held" | "booked";
   hold_expires_at: Date | null;
@@ -52,6 +72,8 @@ export interface BookingSeatRow {
 
 export interface Dataset {
   airports: AirportRow[];
+  airlines: AirlineRow[];
+  fareRules: FareRuleRow[];
   users: UserRow[];
   flights: FlightRow[];
   seats: SeatRow[];
@@ -71,15 +93,29 @@ export const WAVES_PER_DAY = 3;
 export const SEATS_PER_FLIGHT = SEAT_ROWS * SEAT_LETTERS.length;
 export const DEMO_HOLD_MINUTES = 6;
 
+export const AIRLINES: AirlineRow[] = [{ code: "FF", name: "FlyFast" }];
+
+export const FARE_RULES: FareRuleRow[] = [
+  { brand: "basic", carry_on: false, checked_bags: 0, refundable: false, changeable: true, change_fee: "45.00" },
+  { brand: "standard", carry_on: true, checked_bags: 1, refundable: false, changeable: true, change_fee: "25.00" },
+  { brand: "flex", carry_on: true, checked_bags: 2, refundable: true, changeable: true, change_fee: "0.00" },
+];
+
 export const AIRPORTS: AirportRow[] = [
-  { iata: "LHR", name: "Heathrow", city: "London", country: "United Kingdom" },
-  { iata: "LGW", name: "Gatwick", city: "London", country: "United Kingdom" },
-  { iata: "MAN", name: "Manchester", city: "Manchester", country: "United Kingdom" },
-  { iata: "LIS", name: "Humberto Delgado", city: "Lisbon", country: "Portugal" },
-  { iata: "AMS", name: "Schiphol", city: "Amsterdam", country: "Netherlands" },
-  { iata: "BCN", name: "Barcelona-El Prat", city: "Barcelona", country: "Spain" },
-  { iata: "CDG", name: "Charles de Gaulle", city: "Paris", country: "France" },
-  { iata: "MAD", name: "Adolfo Suarez Madrid-Barajas", city: "Madrid", country: "Spain" },
+  { iata: "LHR", name: "Heathrow", city: "London", country: "United Kingdom", tags: "city" },
+  { iata: "LGW", name: "Gatwick", city: "London", country: "United Kingdom", tags: "city" },
+  { iata: "MAN", name: "Manchester", city: "Manchester", country: "United Kingdom", tags: "city" },
+  { iata: "LIS", name: "Humberto Delgado", city: "Lisbon", country: "Portugal", tags: "beach,city" },
+  { iata: "AMS", name: "Schiphol", city: "Amsterdam", country: "Netherlands", tags: "city" },
+  { iata: "BCN", name: "Barcelona-El Prat", city: "Barcelona", country: "Spain", tags: "beach,city" },
+  { iata: "CDG", name: "Charles de Gaulle", city: "Paris", country: "France", tags: "city" },
+  { iata: "MAD", name: "Adolfo Suarez Madrid-Barajas", city: "Madrid", country: "Spain", tags: "beach,city" },
+];
+
+const WAVE_ON_TIME: { min: number; span: number }[] = [
+  { min: 93, span: 5 },
+  { min: 95, span: 4 },
+  { min: 87, span: 8 },
 ];
 
 export const USERS: UserRow[] = [
@@ -168,6 +204,12 @@ function round2(value: number): string {
   return (Math.round(value * 100) / 100).toFixed(2);
 }
 
+function substream(seed: number, name: string): () => number {
+  const hash = createHash("sha1");
+  hash.update(`${seed}:${name}`, "utf8");
+  return mulberry32(hash.digest().readUInt32BE(0));
+}
+
 function utcMidnight(date: Date): Date {
   return new Date(
     Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
@@ -209,7 +251,10 @@ export function generateDataset(seed: number, options: GenerateOptions = {}): Da
         const basePrice = round2(
           r.basePrice * w.multiplier * (0.9 + rng() * 0.2),
         );
+        const onTimeWave = WAVE_ON_TIME[wave]!;
         const flightNo = flightNoFor(route, day, wave);
+        const onTimeRng = substream(seed, `on-time:${flightNo}`);
+        const onTimePct = round2(onTimeWave.min + onTimeRng() * onTimeWave.span);
         flights.push({
           id: uuidFor(`flight:${flightNo}`),
           flight_no: flightNo,
@@ -218,6 +263,8 @@ export function generateDataset(seed: number, options: GenerateOptions = {}): Da
           departs_at: departsAt,
           arrives_at: arrivesAt,
           base_price: basePrice,
+          airline_code: AIRLINES[0]!.code,
+          on_time_pct: onTimePct,
           day,
           wave,
         });
@@ -230,13 +277,17 @@ export function generateDataset(seed: number, options: GenerateOptions = {}): Da
     const seatNos: string[] = [];
     const priceBySeat = new Map<string, string>();
     const classBySeat = new Map<string, SeatRow["class"]>();
+    const brandBySeat = new Map<string, FareBrand>();
     for (let row = 1; row <= SEAT_ROWS; row++) {
       for (const letter of SEAT_LETTERS) {
         const seatNo = `${row}${letter}`;
         const klass: SeatRow["class"] = row <= BUSINESS_ROWS ? "business" : "economy";
+        const brand: FareBrand =
+          klass === "business" ? "flex" : row <= 6 ? "standard" : "basic";
         const window = letter === "A" || letter === "F";
         seatNos.push(seatNo);
         classBySeat.set(seatNo, klass);
+        brandBySeat.set(seatNo, brand);
         priceBySeat.set(
           seatNo,
           round2(
@@ -260,6 +311,7 @@ export function generateDataset(seed: number, options: GenerateOptions = {}): Da
         flight_id: flight.id,
         seat_no: seatNo,
         class: classBySeat.get(seatNo)!,
+        fare_brand: brandBySeat.get(seatNo)!,
         price: priceBySeat.get(seatNo)!,
         status: booked.has(seatNo) ? "booked" : "available",
         hold_expires_at: null,
@@ -314,6 +366,8 @@ export function generateDataset(seed: number, options: GenerateOptions = {}): Da
 
   const fingerprint = fingerprintOf({
     airports: AIRPORTS,
+    airlines: AIRLINES,
+    fareRules: FARE_RULES,
     users: USERS,
     flights,
     seats,
@@ -345,6 +399,8 @@ export function generateDataset(seed: number, options: GenerateOptions = {}): Da
 
   return {
     airports: AIRPORTS,
+    airlines: AIRLINES,
+    fareRules: FARE_RULES,
     users: USERS,
     flights,
     seats,
@@ -358,6 +414,8 @@ export function generateDataset(seed: number, options: GenerateOptions = {}): Da
 
 function fingerprintOf(data: {
   airports: AirportRow[];
+  airlines: AirlineRow[];
+  fareRules: FareRuleRow[];
   users: UserRow[];
   flights: FlightRow[];
   seats: SeatRow[];
@@ -366,6 +424,8 @@ function fingerprintOf(data: {
 }): string {
   const stable = {
     airports: data.airports,
+    airlines: data.airlines,
+    fareRules: data.fareRules,
     users: data.users,
     flights: data.flights.map((f) => [
       f.flight_no,
@@ -374,8 +434,10 @@ function fingerprintOf(data: {
       f.day,
       f.wave,
       f.base_price,
+      f.airline_code,
+      f.on_time_pct,
     ]),
-    seats: data.seats.map((s) => [s.flight_id, s.seat_no, s.class, s.price, s.status]),
+    seats: data.seats.map((s) => [s.flight_id, s.seat_no, s.class, s.fare_brand, s.price, s.status]),
     bookings: data.bookings.map((b) => [
       b.id,
       b.user_ref,

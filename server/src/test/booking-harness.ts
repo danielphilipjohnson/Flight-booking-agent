@@ -39,7 +39,7 @@ const myBookings = async (userRef: string) =>
 const avaCountBaseline = (await myBookings("ava")).n;
 
 console.log("\n# registry shape");
-ok(registry.tools.length === 8, "8 tools registered (5 read + 3 write)");
+ok(registry.tools.length === 12, "12 tools registered (9 read + 3 write)");
 const writeTools = registry.tools.filter((t) => t.requiresConfirmation);
 ok(writeTools.map((t) => t.name).sort().join(",") === "cancel_booking,create_booking,hold_seat", "exactly the 3 write tools are confirm-gated");
 

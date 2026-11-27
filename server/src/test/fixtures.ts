@@ -15,16 +15,20 @@ export async function loadSchemaSql(): Promise<string> {
 }
 
 export function insertDataset(db: DatabaseSync, d: Dataset): void {
-  const insAirport = db.prepare("INSERT INTO airport (iata, name, city, country) VALUES (?, ?, ?, ?)");
+  const insAirline = db.prepare("INSERT INTO airline (code, name) VALUES (?, ?)");
+  const insFareRule = db.prepare("INSERT INTO fare_rule (brand, carry_on, checked_bags, refundable, changeable, change_fee) VALUES (?, ?, ?, ?, ?, ?)");
+  const insAirport = db.prepare("INSERT INTO airport (iata, name, city, country, tags) VALUES (?, ?, ?, ?, ?)");
   const insUser = db.prepare("INSERT INTO app_user (user_ref, display_name, pin) VALUES (?, ?, ?)");
-  const insFlight = db.prepare("INSERT INTO flight (id, flight_no, origin, destination, departs_at, arrives_at, base_price) VALUES (?, ?, ?, ?, ?, ?, ?)");
-  const insSeat = db.prepare("INSERT INTO seat (flight_id, seat_no, class, price, status, hold_expires_at) VALUES (?, ?, ?, ?, ?, ?)");
+  const insFlight = db.prepare("INSERT INTO flight (id, flight_no, origin, destination, departs_at, arrives_at, base_price, airline_code, on_time_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  const insSeat = db.prepare("INSERT INTO seat (flight_id, seat_no, class, fare_brand, price, status, hold_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
   const insBooking = db.prepare("INSERT INTO booking (id, user_ref, status, passenger_name, created_at, hold_expires_at) VALUES (?, ?, ?, ?, ?, ?)");
   const insBs = db.prepare("INSERT INTO booking_seat (booking_id, flight_id, seat_no, active) VALUES (?, ?, ?, ?)");
-  for (const a of d.airports) insAirport.run(a.iata, a.name, a.city, a.country);
+  for (const a of d.airlines) insAirline.run(a.code, a.name);
+  for (const r of d.fareRules) insFareRule.run(r.brand, r.carry_on ? 1 : 0, r.checked_bags, r.refundable ? 1 : 0, r.changeable ? 1 : 0, r.change_fee);
+  for (const a of d.airports) insAirport.run(a.iata, a.name, a.city, a.country, a.tags);
   for (const u of d.users) insUser.run(u.user_ref, u.display_name, u.pin);
-  for (const f of d.flights) insFlight.run(f.id, f.flight_no, f.origin, f.destination, f.departs_at.toISOString(), f.arrives_at.toISOString(), f.base_price);
-  for (const s of d.seats) insSeat.run(s.flight_id, s.seat_no, s.class, s.price, s.status, s.hold_expires_at?.toISOString() ?? null);
+  for (const f of d.flights) insFlight.run(f.id, f.flight_no, f.origin, f.destination, f.departs_at.toISOString(), f.arrives_at.toISOString(), f.base_price, f.airline_code, f.on_time_pct);
+  for (const s of d.seats) insSeat.run(s.flight_id, s.seat_no, s.class, s.fare_brand, s.price, s.status, s.hold_expires_at?.toISOString() ?? null);
   for (const b of d.bookings) insBooking.run(b.id, b.user_ref, b.status, b.passenger_name, b.created_at.toISOString(), b.hold_expires_at?.toISOString() ?? null);
   for (const bs of d.bookingSeats) insBs.run(bs.booking_id, bs.flight_id, bs.seat_no, bs.active ? 1 : 0);
 }
