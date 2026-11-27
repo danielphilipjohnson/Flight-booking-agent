@@ -1,7 +1,19 @@
 import { randomUUID } from "node:crypto";
 import type { Queryable } from "../db/types.ts";
-import { iso, releaseExpiredHoldsStatements } from "./flights.ts";
+import { iso } from "./flights.ts";
 import { checkBookingCancellable, checkBookingConfirmable, checkSeatHoldable } from "./rules.ts";
+import {
+  activeSeatClaims,
+  confirmBooking,
+  createHold,
+  cancelBookingRecord,
+  deactivateSeatClaims,
+  insertSeatClaim,
+  lockBookingForCancel,
+  lockBookingForUpdate,
+  releaseExpiredHoldsStatements,
+} from "../db/queries/bookings.ts";
+import { lockSeatForUpdate, markSeatBooked, markSeatHeld, releaseSeat } from "../db/queries/seats.ts";
 import {
   cancelBookingInput,
   createBookingInput,
@@ -32,30 +44,22 @@ export function createBookingTools(db: Queryable, opts: { holdMinutes: number })
       return inTx(db, async (q) => {
         const now = new Date();
         await releaseExpiredHoldsStatements(q, now);
-        const seats = (
-          await q.query(
-            "SELECT seat_no, class, price, status FROM seat WHERE flight_id = $1 AND seat_no = $2 FOR UPDATE",
-            [flight_id, seat_no],
-          )
-        ).rows;
+        const seats = await lockSeatForUpdate(q, flight_id, seat_no);
         const seat = seats[0]!;
         const seatCheck = checkSeatHoldable(seat, flight_id, seat_no);
         if (!seatCheck.ok) return { error: seatCheck.error };
         const holdExpiresAt = new Date(now.getTime() + minutes * 60_000);
         const holdId = randomUUID();
-        await q.query(
-          "INSERT INTO booking (id, user_ref, status, passenger_name, created_at, hold_expires_at) VALUES ($1, $2, 'held', $3, $4, $5)",
-          [holdId, ctx.userRef, ctx.displayName ?? ctx.userRef, iso(now), iso(holdExpiresAt)],
-        );
-        await q.query(
-          "UPDATE seat SET status = 'held', hold_expires_at = $3 WHERE flight_id = $1 AND seat_no = $2",
-          [flight_id, seat_no, iso(holdExpiresAt)],
-        );
+        await createHold(q, {
+          id: holdId,
+          userRef: ctx.userRef,
+          passengerName: ctx.displayName ?? ctx.userRef,
+          now,
+          holdExpiresAt,
+        });
+        await markSeatHeld(q, flight_id, seat_no, iso(holdExpiresAt));
         try {
-          await q.query(
-            "INSERT INTO booking_seat (booking_id, flight_id, seat_no, active) VALUES ($1, $2, $3, TRUE)",
-            [holdId, flight_id, seat_no],
-          );
+          await insertSeatClaim(q, holdId, flight_id, seat_no);
         } catch (err) {
           const code = (err as { code?: string }).code;
           const message = (err as Error).message;
@@ -104,31 +108,15 @@ export function createBookingTools(db: Queryable, opts: { holdMinutes: number })
       return inTx(db, async (q) => {
         const now = new Date();
         await releaseExpiredHoldsStatements(q, now);
-        const rows = (
-          await q.query(
-            "SELECT id, user_ref, status, hold_expires_at FROM booking WHERE id = $1 FOR UPDATE",
-            [hold_id],
-          )
-        ).rows;
+        const rows = await lockBookingForUpdate(q, hold_id);
         if (rows.length === 0) return { error: `no booking with id ${hold_id}` };
         const b = rows[0]!;
         const confirmCheck = checkBookingConfirmable(b, ctx.userRef, now);
         if (!confirmCheck.ok) return { error: confirmCheck.error };
-        await q.query(
-          "UPDATE booking SET status = 'confirmed', passenger_name = $2, hold_expires_at = NULL WHERE id = $1",
-          [hold_id, passenger_name],
-        );
-        const claims = (
-          await q.query(
-            "SELECT flight_id, seat_no FROM booking_seat WHERE booking_id = $1 AND active = TRUE",
-            [hold_id],
-          )
-        ).rows;
+        await confirmBooking(q, hold_id, passenger_name);
+        const claims = await activeSeatClaims(q, hold_id);
         for (const claim of claims) {
-          await q.query(
-            "UPDATE seat SET status = 'booked', hold_expires_at = NULL WHERE flight_id = $1 AND seat_no = $2",
-            [claim.flight_id, claim.seat_no],
-          );
+          await markSeatBooked(q, String(claim.flight_id), String(claim.seat_no));
         }
         return { booking_id: hold_id, status: "confirmed", passenger_name };
       });
@@ -157,31 +145,18 @@ export function createBookingTools(db: Queryable, opts: { holdMinutes: number })
     run: async (args, ctx: ToolContext) => {
       const { booking_id } = cancelBookingInput.parse(args) as { booking_id: string };
       return inTx(db, async (q) => {
-        const rows = (
-          await q.query(
-            "SELECT id, user_ref, status FROM booking WHERE id = $1 FOR UPDATE",
-            [booking_id],
-          )
-        ).rows;
+        const rows = await lockBookingForCancel(q, booking_id);
         if (rows.length === 0) return { error: `no booking with id ${booking_id}` };
         const b = rows[0]!;
         const cancelCheck = checkBookingCancellable(b, ctx.userRef);
         if (!cancelCheck.ok) return { error: cancelCheck.error };
         if (cancelCheck.alreadyCancelled) return { booking_id, status: "cancelled" };
-        const claims = (
-          await q.query(
-            "SELECT flight_id, seat_no FROM booking_seat WHERE booking_id = $1 AND active = TRUE",
-            [booking_id],
-          )
-        ).rows;
+        const claims = await activeSeatClaims(q, booking_id);
         for (const claim of claims) {
-          await q.query(
-            "UPDATE seat SET status = 'available', hold_expires_at = NULL WHERE flight_id = $1 AND seat_no = $2",
-            [claim.flight_id, claim.seat_no],
-          );
+          await releaseSeat(q, String(claim.flight_id), String(claim.seat_no));
         }
-        await q.query("UPDATE booking_seat SET active = FALSE WHERE booking_id = $1", [booking_id]);
-        await q.query("UPDATE booking SET status = 'cancelled' WHERE id = $1", [booking_id]);
+        await deactivateSeatClaims(q, booking_id);
+        await cancelBookingRecord(q, booking_id);
         return { booking_id, status: "cancelled" };
       });
     },
