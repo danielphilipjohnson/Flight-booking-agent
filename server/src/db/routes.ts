@@ -1,11 +1,10 @@
 import { pool } from "./postgres.ts";
 import type { Queryable } from "./types.ts";
+import { listAirportCities } from "./queries/airports.ts";
 import type { RouteBrief } from "../agent/prompt.ts";
 
 export async function loadRouteBriefFrom(db: Queryable): Promise<RouteBrief> {
-  const airports = (
-    await db.query("SELECT iata, city FROM airport ORDER BY city, iata")
-  ).rows;
+  const airports = await listAirportCities(db);
   const cities = new Map<string, string[]>();
   for (const row of airports) {
     const city = String(row.city);

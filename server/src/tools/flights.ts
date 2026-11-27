@@ -1,6 +1,7 @@
 import type { Queryable } from "../db/types.ts";
 import { resolveAirports, type AirportRowLite } from "../agent/airports.ts";
 import { dateWindow, isoDay } from "../agent/dates.ts";
+import { listAirports } from "../db/queries/airports.ts";
 import {
   filterOffersInput,
   findFirstAvailableFlightInput,
@@ -68,9 +69,7 @@ async function resolveCodes(db: Queryable, value: string): Promise<string[]> {
 }
 
 async function allAirports(db: Queryable): Promise<(AirportRowLite & { tags: string })[]> {
-  const rows = (
-    await db.query("SELECT iata, name, city, country, tags FROM airport ORDER BY iata")
-  ).rows;
+  const rows = await listAirports(db);
   return rows.map((r) => ({
     iata: String(r.iata),
     name: String(r.name),
