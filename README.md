@@ -77,6 +77,20 @@ invariants of the generated dataset plus a `node:sqlite` simulation of
 cases) asserting the tool schemas, ranking, resolver and message-normalization
 layers never throw or violate their invariants on junk input.
 
+## Prices & offers (policy)
+
+- **Prices are static demo data** - the "cache", not live GDS quotes. Search
+  results are instant because the dataset is local; nothing here pretends to
+  be a live fare. Live quotes are deferred until a real inventory source
+  (e.g. Duffel) exists.
+- **Offers expire.** Every offer carries `expires_at` (15 minutes from
+  search). The agent prompt re-searches rather than quoting stale prices;
+  Phase 3's confirm step must re-validate price before any write ("price may
+  have changed" copy belongs there).
+- **Fare rules are data, not prose.** Bags, refundability and change fees
+  come from the `fare_rule` table via the seat's `fare_brand` - Basic Economy
+  has no carry-on, and the prompt forbids hiding that next to a price.
+
 ## Design decisions that carry the portfolio story
 
 - **Ownership is enforced in SQL, not in the prompt.** Every booking query is
@@ -111,7 +125,7 @@ layers never throw or violate their invariants on junk input.
 | Phase | Scope | Done when |
 | --- | --- | --- |
 | 1. Foundations | Repo scaffold, Docker Compose, schema, deterministic seed | `docker compose up` + `npm run seed` gives queryable data (this PR) |
-| 2. Read-only agent | Agent loop, 4 read tools, Ollama tool-calling, chat UI, Mongo history | "flights to Lisbon tomorrow" → correct multi-step tool calls; per-user history survives restart |
+| 2. Read-only agent | Agent loop, 7 read tools (search, flexible dates, browse, theme browse, filter, fare details, resolver), round trips, Ollama tool-calling, chat UI, Mongo history | "flights to Lisbon tomorrow" → correct multi-step tool calls; "is a carry-on included?" answered from fare rules; per-user history survives restart |
 | 3. Booking + transactions | hold/create/cancel, `FOR UPDATE`, confirm gate, concurrency test | Two parallel booking attempts → exactly one wins |
 | 4. Hardening + evals | Retry on malformed args, iteration cap, sliding-window history, eval set | Eval suite passes; "book without asking" is refused |
 | 5. Portfolio polish | README diagram, concurrency write-up, demo recording | Reviewer clones, `compose up`, books a seat in <10 min |

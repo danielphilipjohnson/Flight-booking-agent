@@ -33,10 +33,12 @@ The agent layer lives in `server/src/agent/`:
 
 | Tool | When it fires | What it returns |
 | --- | --- | --- |
-| `search_flight_offers` | The user wants flights for a specific date | Ranked shortlist (best / cheapest / fastest), alternatives, seats-available per offer |
+| `search_flight_offers` | The user wants flights for a specific date (optional `return_date` for round trips) | Ranked shortlist (best / cheapest / fastest), alternatives, per-offer fare rules (airline, fare brand, bags, refundability, change fee, on-time pct, expires_at); round trips return outbound + return shortlists and a combined cheapest total |
 | `search_flexible_dates` | The date is vague ("next week", "around the 14th") | Per-day cheapest prices, cheapest day, shortlist over the window |
-| `search_anywhere` | The user has no destination ("where can I go for under 300?") | Up to 10 destinations from the origin, cheapest-price order |
+| `search_anywhere` | The user has no destination and no theme ("where can I go for under 300?") | Up to 10 destinations from the origin, cheapest-price order |
+| `search_inspiration` | The user has a theme, not a place ("somewhere warm", "beach", "skiing") | Theme-matched destinations price-ranked (beach: LIS/BCN/MAD) |
 | `filter_offers` | Refining the last search ("cheaper", "not before noon") | Filtered + re-ranked shortlist, no re-query |
+| `get_fare_details` | "Is a carry-on included?", "can I cancel?" | Full fare breakdown: airline, fare brand (Basic/Standard/Flex), bags, refundability, change fee, seat availability |
 | `resolve_airport_code` | The model wants to check which airports a place maps to | Matching airports with city + country |
 
 All tools accept cities or IATA codes for origin/destination. Origin and
@@ -181,18 +183,26 @@ reachable from the origin); the agent turns them into choices.
 ## Presenting results
 
 Offer objects carry everything needed to decide without a follow-up call:
-total and per-person price (EUR, demo data), flight number, origin ->
-destination with airports, departure/arrival times (UTC), duration, seats
-remaining, and window-seat availability. The shortlist is three picks —
-**Best** (price + duration + departure-time sanity; pre-6am and post-11pm
-departures are penalized), **Cheapest**, **Fastest** — followed by up to five
-alternatives the agent can reveal on request.
+total and per-person price (EUR, demo data), flight number, airline (FlyFast),
+origin -> destination with airports, departure/arrival times (UTC), duration,
+seats remaining, window-seat availability, and the cheapest seat's fare rules:
+fare brand (**Basic** - no carry-on, non-refundable, 45 EUR change fee /
+**Standard** - carry-on + 1 bag, 25 EUR change fee / **Flex** - refundable,
+2 bags), on-time percentage, and a 15-minute `expires_at`. The shortlist is
+three picks — **Best** (price + duration + departure-time sanity + on-time
+record; pre-6am and post-11pm departures are penalized), **Cheapest**,
+**Fastest** — plus an **Upgrade pick** when a business fare is within 150 EUR
+per person of the cheapest economy fare, and up to five alternatives the agent
+can reveal on request. The prompt forbids hiding a Basic Economy fare's missing
+carry-on next to its price.
 
 ## Edge cases
 
 | Case | Behavior |
 | --- | --- |
 | Unknown place ("Tokyo") | Tool returns the known airport list; agent explains the dataset limits and asks what to do |
+| Round trip with one empty leg | Tool names the empty leg, suggests for that leg only |
+| Theme with no destinations ("skiing") | Tool lists the supported themes; agent offers the closest available |
 | Ambiguous date ("the 14th") | One clarifying question before searching |
 | Multi-airport city ("London") | All airports searched; offers labelled with airport |
 | Date outside the 14-day window | Agent states the window and offers in-window alternatives |
@@ -215,17 +225,11 @@ drifted, otherwise most date-window searches will correctly return empty.
 
 ## Current limits
 
-- One-way searches only; round-trip return dates are a follow-up
-  ([#30](https://github.com/danielphilipjohnson/Flight-booking-agent/issues/30)).
-- No theme-based inspiration search
-  ([#31](https://github.com/danielphilipjohnson/Flight-booking-agent/issues/31));
-  no baggage/fare-brand/refundability fields in offers
-  ([#32](https://github.com/danielphilipjohnson/Flight-booking-agent/issues/32));
-  no upgrade pick ([#33](https://github.com/danielphilipjohnson/Flight-booking-agent/issues/33));
-  no reliability-weighted ranking
-  ([#34](https://github.com/danielphilipjohnson/Flight-booking-agent/issues/34)).
-- Prices are static demo data — the live-vs-cached policy and
-  "price may have changed" copy are tracked in
-  [#35](https://github.com/danielphilipjohnson/Flight-booking-agent/issues/35).
-- Pinned offers live in server memory per session; after a restart the agent
-  re-searches instead of filtering.
+- Multi-city / open-jaw itineraries are not implemented (see the
+  [scoping doc](scoping/shopping-search-scenarios.md), section C).
+- Child / infant fares are not modeled; the agent should say so.
+- One airline (FlyFast) — airline and alliance filters are vacuous for now.
+- Prices are static demo data — see "Prices & offers (policy)" in the README;
+  Phase 3's confirm step owns the "price may have changed" re-validation.
+- Pinned offers live in server memory per session (capped, FIFO); after a
+  restart the agent re-searches instead of filtering.
