@@ -1,34 +1,20 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import Login from "./Login.tsx";
 import { Markdown } from "./Markdown.tsx";
-import { loadSession, type User } from "../lib/api.ts";
 import {
-  appendAssistantNote,
-  appendAssistantPlaceholder,
-  appendTokenToLastAssistant,
-  appendToolChip,
-  appendUserTurn,
-  finalizeLastAssistant,
+  canCompose,
+  isBusy,
+  streamHasStarted,
+  waitingForFirstToken,
+} from "../lib/chatReducer.ts";
+import {
   formatMessageTime,
   formatMessageTimestamp,
-  fromStoredMessages,
-  markLastUserDelivered,
-  removeEmptyTrailingAssistant,
-  streamChatTurn,
   type ChatMessage,
-  type PendingConfirmation,
 } from "../lib/chatStream.ts";
-
-type ChatState =
-  | { stage: "idle" }
-  | { stage: "streaming" }
-  | { stage: "awaiting_confirmation"; pending: PendingConfirmation }
-  | { stage: "confirming"; pending: PendingConfirmation }
-  | { stage: "failed"; error: string };
-
-type HistoryState = "loading" | "ready" | "error";
+import { useChat } from "../lib/useChat.ts";
 
 function MessageMeta({ message }: { message: ChatMessage }) {
   if (!message.ts) return null;
@@ -55,141 +41,33 @@ function MessageMeta({ message }: { message: ChatMessage }) {
 
 export default function Chat({
   sessionId,
-  user,
   onLogout,
 }: {
   sessionId: string;
-  user: User;
   onLogout: () => void;
 }) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [history, setHistory] = useState<HistoryState>("loading");
-  const [historyError, setHistoryError] = useState<string | null>(null);
-  const [input, setInput] = useState("");
-  const [chat, setChat] = useState<ChatState>({ stage: "idle" });
+  const { state, setInput, send, decide, login, logout } = useChat({ sessionId });
 
-  const busy = chat.stage === "streaming" || chat.stage === "confirming";
-  const canCompose = chat.stage === "idle" || chat.stage === "failed";
-
-  const lastMessage = messages[messages.length - 1];
-  const waitingForFirstToken =
-    chat.stage === "streaming" &&
-    lastMessage !== undefined &&
-    lastMessage.role === "assistant" &&
-    lastMessage.content === "" &&
-    (lastMessage.toolTrace?.length ?? 0) === 0;
-  const streamHasStarted =
-    chat.stage === "streaming" &&
-    lastMessage !== undefined &&
-    lastMessage.role === "assistant" &&
-    (lastMessage.content.length > 0 || (lastMessage.toolTrace?.length ?? 0) > 0);
-
-  useEffect(() => {
-    let cancelled = false;
-    setHistory("loading");
-    setMessages([]);
-    setChat({ stage: "idle" });
-    loadSession(sessionId)
-      .then((body) => {
-        if (cancelled) return;
-        setMessages(fromStoredMessages(body.messages));
-        setHistory("ready");
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setHistoryError((err as Error).message);
-        setHistory("error");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId]);
-
-  async function send(e: React.FormEvent) {
-    e.preventDefault();
-    if (!input.trim() || !canCompose || history !== "ready") return;
-    const text = input.trim();
-    setInput("");
-    setChat({ stage: "streaming" });
-    setMessages((m) => appendAssistantPlaceholder(appendUserTurn(m, text)));
-    try {
-      await streamChatTurn({ sessionId, message: text }, (event) => {
-        switch (event.type) {
-          case "token":
-            setMessages((m) => appendTokenToLastAssistant(m, event.text));
-            break;
-          case "tool":
-            setMessages((m) => appendToolChip(m, event));
-            break;
-          case "confirm":
-            setChat({ stage: "awaiting_confirmation", pending: event.pending });
-            break;
-          case "done":
-            setMessages((m) =>
-              finalizeLastAssistant(
-                markLastUserDelivered(m),
-                event.reply,
-                event.toolTrace,
-              ),
-            );
-            setChat((c) =>
-              c.stage === "awaiting_confirmation"
-                ? c
-                : event.pendingConfirmation
-                  ? { stage: "awaiting_confirmation", pending: event.pendingConfirmation }
-                  : { stage: "idle" },
-            );
-            break;
-          case "error":
-            console.error("[chat] stream error", { sessionId, error: event.error });
-            throw new Error(event.error);
-          case "typing":
-            break;
-        }
-      });
-      setChat((c) => (c.stage === "streaming" ? { stage: "idle" } : c));
-    } catch (err) {
-      console.error("[chat] turn failed", { sessionId, message: text, err });
-      setMessages((m) => removeEmptyTrailingAssistant(m));
-      setChat({ stage: "failed", error: (err as Error).message });
-    }
+  if (!state.user) {
+    return <Login onLoggedIn={(user) => void login(user)} />;
   }
 
-  async function decide(confirm: boolean) {
-    if (chat.stage !== "awaiting_confirmation") return;
-    const pending = chat.pending;
-    if (!confirm) {
-      setChat({ stage: "idle" });
-      setMessages((m) => appendAssistantNote(m, "Declined — no changes were made."));
-      return;
-    }
-    setChat({ stage: "confirming", pending });
-    try {
-      const res = await fetch(`/api/tools/${pending.tool}/confirm`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          sessionId,
-          confirmationId: pending.id,
-          args: pending.args,
-        }),
-      });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      setMessages((m) =>
-        appendAssistantNote(
-          m,
-          `Confirmed: ${pending.tool} → ${JSON.stringify(body.result)}`,
-          [{ name: pending.tool, status: "ok", summary: "confirmed & executed" }],
-        ),
-      );
-      setChat({ stage: "idle" });
-    } catch (err) {
-      setMessages((m) =>
-        appendAssistantNote(m, `Confirmation failed: ${(err as Error).message}`),
-      );
-      setChat({ stage: "failed", error: (err as Error).message });
-    }
+  const busy = isBusy(state);
+  const compose = canCompose(state);
+  const { stage } = state;
+
+  const lastMessage = state.messages[state.messages.length - 1];
+  const waiting = waitingForFirstToken(state);
+  const started = streamHasStarted(state);
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    void send(state.input);
+  }
+
+  function handleLogout() {
+    logout();
+    onLogout();
   }
 
   return (
@@ -199,9 +77,9 @@ export default function Chat({
           ← Conversations
         </Link>
         <span className="muted">
-          {user.display_name} ({user.user_ref})
+          {state.user.display_name} ({state.user.user_ref})
         </span>
-        <button className="logout" onClick={onLogout}>
+        <button className="logout" onClick={handleLogout}>
           Log out
         </button>
       </header>
@@ -213,26 +91,26 @@ export default function Chat({
          * pinned at the bottom. New tokens keep the view anchored there without
          * any scrollTop juggling.
          */}
-        {chat.stage === "awaiting_confirmation" && (
+        {stage === "awaiting_confirmation" && (
           <div className="msg assistant">
             <div className="bubble confirm-card">
-              <strong>Confirm write:</strong> {chat.pending.tool}{" "}
-              <code>{JSON.stringify(chat.pending.args)}</code>
+              <strong>Confirm write:</strong> {state.pending.tool}{" "}
+              <code>{JSON.stringify(state.pending.args)}</code>
               <div className="confirm-actions">
-                <button onClick={() => decide(true)} disabled={busy}>
+                <button onClick={() => void decide(true)} disabled={busy}>
                   Confirm
                 </button>
-                <button className="decline" onClick={() => decide(false)} disabled={busy}>
+                <button className="decline" onClick={() => void decide(false)} disabled={busy}>
                   Decline
                 </button>
               </div>
             </div>
           </div>
         )}
-        {[...messages].reverse().map((m) => {
+        {[...state.messages].reverse().map((m) => {
           // While waiting, the placeholder itself becomes the typing bubble —
           // no empty message with a timestamp next to the dots.
-          if (waitingForFirstToken && m.id === lastMessage?.id) {
+          if (waiting && m.id === lastMessage?.id) {
             return (
               <div
                 key={m.id}
@@ -255,7 +133,7 @@ export default function Chat({
               <div className="bubble">
                 <div className="bubble-body">
                   {m.role === "assistant" ? <Markdown>{m.content}</Markdown> : m.content}
-                  {streamHasStarted && m.id === lastMessage?.id && (
+                  {started && m.id === lastMessage?.id && (
                     <span className="thinking-inline" role="status" aria-label="Still thinking">
                       thinking…
                     </span>
@@ -275,11 +153,11 @@ export default function Chat({
             </div>
           );
         })}
-        {history === "loading" && <p className="muted">Loading conversation…</p>}
-        {history === "error" && (
-          <p className="error">Could not load this conversation: {historyError}</p>
+        {state.history === "loading" && <p className="muted">Loading conversation…</p>}
+        {state.history === "error" && (
+          <p className="error">Could not load this conversation: {state.historyError}</p>
         )}
-        {history === "ready" && messages.length === 0 && (
+        {state.history === "ready" && state.messages.length === 0 && (
           <p className="muted">
             Try: &ldquo;flights from London to Lisbon tomorrow&rdquo; or &ldquo;what are my
             bookings?&rdquo;
@@ -287,22 +165,19 @@ export default function Chat({
         )}
       </div>
 
-      {chat.stage === "failed" && <p className="error">{chat.error}</p>}
-      <form className="composer" onSubmit={send}>
+      {stage === "failed" && <p className="error">{state.error}</p>}
+      <form className="composer" onSubmit={handleSubmit}>
         <input
-          value={input}
+          value={state.input}
           onChange={(e) => setInput(e.target.value)}
           placeholder={
-            chat.stage === "awaiting_confirmation"
+            stage === "awaiting_confirmation"
               ? "Resolve the confirmation above first…"
               : "Ask about flights or your bookings…"
           }
-          disabled={!canCompose || history !== "ready"}
+          disabled={!compose}
         />
-        <button
-          type="submit"
-          disabled={!canCompose || history !== "ready" || !input.trim()}
-        >
+        <button type="submit" disabled={!compose || !state.input.trim()}>
           Send
         </button>
       </form>
