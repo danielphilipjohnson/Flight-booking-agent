@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Queryable } from "../db/types.ts";
 import { iso, releaseExpiredHoldsStatements } from "./flights.ts";
+import { checkBookingCancellable, checkBookingConfirmable, checkSeatHoldable } from "./rules.ts";
 import {
   cancelBookingInput,
   createBookingInput,
@@ -37,9 +38,9 @@ export function createBookingTools(db: Queryable, opts: { holdMinutes: number })
             [flight_id, seat_no],
           )
         ).rows;
-        if (seats.length === 0) return { error: `no seat ${seat_no} on flight ${flight_id}` };
         const seat = seats[0]!;
-        if (seat.status !== "available") return { error: `seat ${seat_no} is ${seat.status}` };
+        const seatCheck = checkSeatHoldable(seat, flight_id, seat_no);
+        if (!seatCheck.ok) return { error: seatCheck.error };
         const holdExpiresAt = new Date(now.getTime() + minutes * 60_000);
         const holdId = randomUUID();
         await q.query(
@@ -111,13 +112,8 @@ export function createBookingTools(db: Queryable, opts: { holdMinutes: number })
         ).rows;
         if (rows.length === 0) return { error: `no booking with id ${hold_id}` };
         const b = rows[0]!;
-        if (b.user_ref !== ctx.userRef) {
-          return { error: "this booking does not belong to the session user" };
-        }
-        if (b.status !== "held") return { error: `booking is ${b.status}, not held` };
-        if (b.hold_expires_at && iso(b.hold_expires_at) < iso(now)) {
-          return { error: "hold has expired" };
-        }
+        const confirmCheck = checkBookingConfirmable(b, ctx.userRef, now);
+        if (!confirmCheck.ok) return { error: confirmCheck.error };
         await q.query(
           "UPDATE booking SET status = 'confirmed', passenger_name = $2, hold_expires_at = NULL WHERE id = $1",
           [hold_id, passenger_name],
@@ -169,10 +165,9 @@ export function createBookingTools(db: Queryable, opts: { holdMinutes: number })
         ).rows;
         if (rows.length === 0) return { error: `no booking with id ${booking_id}` };
         const b = rows[0]!;
-        if (b.user_ref !== ctx.userRef) {
-          return { error: "this booking does not belong to the session user" };
-        }
-        if (b.status === "cancelled") return { booking_id, status: "cancelled" };
+        const cancelCheck = checkBookingCancellable(b, ctx.userRef);
+        if (!cancelCheck.ok) return { error: cancelCheck.error };
+        if (cancelCheck.alreadyCancelled) return { booking_id, status: "cancelled" };
         const claims = (
           await q.query(
             "SELECT flight_id, seat_no FROM booking_seat WHERE booking_id = $1 AND active = TRUE",
